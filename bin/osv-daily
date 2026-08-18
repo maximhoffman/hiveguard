@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# osv-daily — ежедневная проверка всех проектов на уязвимости (запускается launchd).
-# Один скан → JSON → компактный HTML-отчёт + уведомление macOS при находках.
-# Также обновляет каталог угроз bumblebee, чтобы install-гейт оставался свежим.
+# osv-daily — daily vulnerability scan of all your projects (run by launchd).
+# One scan -> JSON -> compact HTML report + macOS notification on findings.
+# Also refreshes the bumblebee threat catalog so the install-gate stays current.
 #
-#   osv-daily            # скан ~/Projects
-#   osv-daily <путь>     # скан другой папки
+#   osv-daily            # scan ~/Projects
+#   osv-daily <path>     # scan another folder
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
@@ -14,18 +14,18 @@ JSON="$(mktemp)"; trap 'rm -f "$JSON"' EXIT
 LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
 STAMP="$(date '+%Y-%m-%d %H:%M')"
 
-command -v osv-scanner >/dev/null || { echo "нет osv-scanner"; exit 1; }
+command -v osv-scanner >/dev/null || { echo "osv-scanner not found"; exit 1; }
 
-# слой bumblebee: держим каталог свежим (install-гейт)
+# bumblebee layer: keep the catalog fresh (install-gate)
 if [ -d "$HOME/bumblebee-src/.git" ]; then
   git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null || true
 fi
 
-# один скан всех проектов
+# one scan over all projects
 osv-scanner scan source --recursive --format json "$TARGET" > "$JSON" 2>/dev/null || true
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
-# счётчики для уведомления — каждый отдельным устойчивым запросом (tonumber? // 0)
+# counters for the notification — each a separate resilient query (tonumber? // 0)
 jqn() { jq -r "$1" "$JSON" 2>/dev/null || echo 0; }
 VULNS=$(jqn '[.results[]?.packages[]? | (.vulnerabilities // []) | length] | add // 0')
 PKGS=$(jqn '[.results[]?.packages[]? | select(((.vulnerabilities // [])|length)>0)] | length')
@@ -33,7 +33,7 @@ PROJECTS=$(jqn '[.results[]? | select(([.packages[]?.vulnerabilities[]?]|length)
 CRIT=$(jqn '[.results[]?.packages[]?.groups[]?.max_severity | (tonumber? // 0) | select(.>=9)] | length')
 VULNS=${VULNS:-0}; PKGS=${PKGS:-0}; PROJECTS=${PROJECTS:-0}; CRIT=${CRIT:-0}
 
-# компактный HTML-отчёт
+# compact HTML report
 JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" \
   VULNS="$VULNS" PKGS="$PKGS" PROJECTS="$PROJECTS" CRIT="$CRIT" python3 <<'PYEOF'
 import json, os, html, re
@@ -109,14 +109,14 @@ for pr in projects:
         f'<span class="chev">▶</span>'
         f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
         f'<span class="pname">{short(pr["src"])}</span>'
-        f'<span class="cnt">{len(pr["pkgs"])} пакет(ов)</span></summary>'
-        f'<div class="tblwrap"><table><thead><tr><th>Пакет</th><th>Версия</th><th>Макс. severity</th><th>Фикс в</th><th>ID</th></tr></thead>'
+        f'<span class="cnt">{len(pr["pkgs"])} packages</span></summary>'
+        f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th><th>Max severity</th><th>Fixed in</th><th>IDs</th></tr></thead>'
         f'<tbody>{"".join(items)}</tbody></table></div></details>')
 
-body = "".join(rows_html) or '<p class="clean">✅ Известных уязвимостей не найдено.</p>'
-toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Развернуть всё</button></div>' if projects else ''
+body = "".join(rows_html) or '<p class="clean">✅ No known vulnerabilities found.</p>'
+toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Expand all</button></div>' if projects else ''
 
-page = f'''<title>OSV — проекты</title>
+page = f'''<title>OSV — projects</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{{--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
@@ -168,18 +168,18 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 <div class="wrap">
 <header>
 <p class="eyebrow">osv-daily · {html.escape(ig("STAMP"))}</p>
-<h1>Уязвимости в проектах</h1>
-<p class="lede">Скан <code>{html.escape(ig("TARGET"))}</code> по базе OSV. Отсортировано по критичности. Клик по ID — карточка на osv.dev.</p>
+<h1>Vulnerabilities in projects</h1>
+<p class="lede">Scan of <code>{html.escape(ig("TARGET"))}</code> against the OSV database. Sorted by severity. Click an ID for its osv.dev page.</p>
 <div class="stats">
-<div class="stat"><div class="n">{ig("PROJECTS","0")}</div><div class="l">проектов затронуто</div></div>
-<div class="stat"><div class="n">{ig("PKGS","0")}</div><div class="l">пакетов</div></div>
-<div class="stat"><div class="n">{ig("VULNS","0")}</div><div class="l">уязвимостей</div></div>
-<div class="stat crit"><div class="n">{ig("CRIT","0")}</div><div class="l">критических</div></div>
+<div class="stat"><div class="n">{ig("PROJECTS","0")}</div><div class="l">projects affected</div></div>
+<div class="stat"><div class="n">{ig("PKGS","0")}</div><div class="l">packages</div></div>
+<div class="stat"><div class="n">{ig("VULNS","0")}</div><div class="l">vulnerabilities</div></div>
+<div class="stat crit"><div class="n">{ig("CRIT","0")}</div><div class="l">critical</div></div>
 </div>
 </header>
 {toolbar}
 {body}
-<footer>osv-daily · один скан → отчёт + уведомление. bumblebee-каталог обновляется тем же запуском. Патчи ставь сам: обнови зависимость до «Фикс в».</footer>
+<footer>osv-daily · one scan -> report + notification. The bumblebee catalog is refreshed by the same run. Apply fixes yourself: bump the dependency to "Fixed in".</footer>
 </div>
 <script>
 (function(){{
@@ -189,7 +189,7 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
     var ds=[].slice.call(document.querySelectorAll('details.proj'));
     var open=ds.some(function(d){{return !d.open;}});
     ds.forEach(function(d){{d.open=open;}});
-    b.textContent=open?'Свернуть всё':'Развернуть всё';
+    b.textContent=open?'Collapse all':'Expand all';
   }});
 }})();
 </script>'''
@@ -198,10 +198,10 @@ PYEOF
 
 echo "[$STAMP] projects=$PROJECTS pkgs=$PKGS vulns=$VULNS crit=$CRIT → $REPORT" >> "$LOGDIR/osv-daily.log"
 
-# уведомление при находках
+# notification on findings
 if [ "${VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
-  terminal-notifier -title "osv-daily: найдены уязвимости" \
-    -message "$PROJECTS проект(ов), $PKGS пакет(ов), $VULNS всего ($CRIT крит.)" \
+  terminal-notifier -title "osv-daily: vulnerabilities found" \
+    -message "$PROJECTS project(s), $PKGS package(s), $VULNS total ($CRIT critical)" \
     -open "file://$REPORT" -sender com.apple.Terminal 2>/dev/null || true
 fi
-echo "готово: $VULNS уязвимостей в $PROJECTS проектах → $REPORT"
+echo "✅ done: $VULNS vulnerabilities across $PROJECTS projects → $REPORT"

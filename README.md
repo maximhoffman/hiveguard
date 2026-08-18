@@ -40,7 +40,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `deps-audit` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
 | `osv-daily` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
 | `brew-changelog` | Before `brew upgrade`: collects changelogs of outdated formulae into one HTML page, **major** version jumps highlighted. |
-| `hiveguard` | Dispatcher — mainly `hiveguard update` to self-update (git pull + re-install). |
+| `hiveguard` | Single entry point — `add` / `scan` / `daily` / `brew` dispatch to the tools below, plus `update` to self-update. |
 
 ---
 
@@ -142,6 +142,16 @@ Optional but recommended:
 
 ## Usage
 
+Everything is reachable through the single `hiveguard` command, or by calling each
+tool directly — they're equivalent:
+
+```bash
+hiveguard add   npm react-router     # = safe-add npm react-router
+hiveguard scan  ~/Projects/app       # = deps-audit ~/Projects/app
+hiveguard daily                      # = osv-daily
+hiveguard brew                       # = brew-changelog
+```
+
 ### `safe-add` — gated install
 
 ```bash
@@ -165,14 +175,14 @@ a critical CVE is blocked:
 
 ```
 $ safe-add npm react-router@7.13.0 --check-only
-уязвимых пакетов в дереве: 1
+vulnerable packages in tree: 1
   CVE   react-router@7.13.0   GHSA-2j2x-hqr9-3h42,GHSA-337j-9hxr-rhxg,…
-⚠ уязвимости есть (12; high: 6), но не критичные — продолжаю
+⚠ vulnerabilities present (12; high: 6), none critical — proceeding
 
 $ safe-add npm lodash@4.17.4 --check-only
   CRIT  lodash@4.17.4         GHSA-jf85-cpcp-j695,…
-✖ критических (CVSS≥9): 1
-Установка отменена. Обойти осознанно: добавь --force
+✖ critical (CVSS≥9): 1
+Install cancelled. Override deliberately with --force
 ```
 
 ### `deps-audit` — scan on demand

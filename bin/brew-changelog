@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
-# brew-changelog — собирает ченжлоги по устаревшим brew-формулам в одну HTML-страницу.
-# Мажорные скачки версий подсвечиваются. НИЧЕГО НЕ ОБНОВЛЯЕТ — только читает.
+# brew-changelog — collect changelogs of outdated brew formulae into one HTML page.
+# Major version jumps are highlighted. UPGRADES NOTHING — read-only.
 #
-# Использование:
-#   brew-changelog                 # все устаревшие формулы → страница + открыть
-#   brew-changelog --no-update     # не запускать brew update (быстрее)
-#   brew-changelog -o /path.html   # свой путь вывода
-#   ONLY=ada-url,ast-grep brew-changelog   # только эти (для проверки)
+# Usage:
+#   brew-changelog                 # all outdated formulae -> page + open
+#   brew-changelog --no-update     # skip `brew update` (faster)
+#   brew-changelog -o /path.html   # custom output path
+#   ONLY=ada-url,ast-grep brew-changelog   # only these (for testing)
 #
-# Требует: brew, jq. Ченжлоги тянутся через gh (если авторизован); иначе — ссылки.
+# Requires: brew, jq. Changelogs are pulled via gh (if authenticated); else links only.
 set -euo pipefail
 
 DO_UPDATE=1
-OUT="$HOME/.claude/pages/brew-changelog-$(date +%Y%m%d-%H%M).html"
+OUT="$HOME/.hiveguard/brew-changelog-$(date +%Y%m%d-%H%M).html"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-update) DO_UPDATE=0 ;;
     -o) shift; OUT="$1" ;;
-    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "неизвестный флаг: $1" >&2; exit 2 ;;
+    -h|--help) grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac; shift
 done
 
-command -v brew >/dev/null || { echo "нет brew"; exit 1; }
-command -v jq   >/dev/null || { echo "нужен jq (brew install jq)"; exit 1; }
+command -v brew >/dev/null || { echo "brew not found"; exit 1; }
+command -v jq   >/dev/null || { echo "jq required (brew install jq)"; exit 1; }
 HAVE_GH=0
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then HAVE_GH=1; fi
 mkdir -p "$(dirname "$OUT")"
 
-if [ "$DO_UPDATE" -eq 1 ]; then echo "🍺 brew update…" >&2; brew update >/dev/null 2>&1 || true; fi
+if [ "$DO_UPDATE" -eq 1 ]; then echo "🍺 brew update..." >&2; brew update >/dev/null 2>&1 || true; fi
 
 OUTDATED=$(brew outdated --json=v2 2>/dev/null | jq -c '.formulae')
 NAMES=$(jq -r '.[].name' <<<"$OUTDATED")
 if [ -n "${ONLY:-}" ]; then
   NAMES=$(tr ',' '\n' <<<"$ONLY")
 fi
-[ -z "$NAMES" ] && { echo "нечего обновлять — всё свежее 🎉"; exit 0; }
+[ -z "$NAMES" ] && { echo "nothing to upgrade — everything is fresh"; exit 0; }
 N=$(grep -c . <<<"$NAMES")
 
-# известные не-GitHub формулы → их реальный репозиторий (bash 3.2 без assoc-массивов)
+# known non-GitHub formulae -> their real repository (bash 3.2 has no assoc arrays)
 repo_override() {
   case "$1" in
     node) echo "nodejs/node" ;;
@@ -54,7 +54,7 @@ repo_override() {
   esac
 }
 
-# батч-инфо: name → stable_url, homepage (один вызов на все)
+# batch info: name -> stable_url, homepage (one call for all)
 INFO=$(brew info --json=v2 $NAMES 2>/dev/null | jq -c '[.formulae[] | {name, url:.urls.stable.url, homepage}]')
 
 ACC="$(mktemp)"; TMPREL="$(mktemp)"; DATAJSON="$(mktemp)"
@@ -128,7 +128,7 @@ def card(d):
     links = []
     if d["repo"]:    links.append(f'<a href="https://github.com/{html.escape(d["repo"])}" target="_blank" rel="noopener">repo</a>')
     if d["compare"]: links.append(f'<a href="{html.escape(d["compare"])}" target="_blank" rel="noopener">diff {html.escape(d["old"])}…{html.escape(d["new"])}</a>')
-    if d["home"]:    links.append(f'<a href="{html.escape(d["home"])}" target="_blank" rel="noopener">сайт</a>')
+    if d["home"]:    links.append(f'<a href="{html.escape(d["home"])}" target="_blank" rel="noopener">site</a>')
     linkrow = f'<div class="links">{" · ".join(links)}</div>' if links else ''
     if rels:
         items = []
@@ -137,22 +137,22 @@ def card(d):
             date  = (r.get("date") or "")[:10]
             body  = (r.get("body") or "").strip()
             body  = body[:1400] + ("…" if len(body) > 1400 else "")
-            bodyhtml = md_light(body).replace("\n", "<br>") if body else '<span class="empty">— без описания —</span>'
+            bodyhtml = md_light(body).replace("\n", "<br>") if body else '<span class="empty">— no description —</span>'
             items.append(
                 f'<details class="rel"><summary><span class="rtag">{html.escape(r.get("tag",""))}</span>'
                 f'<span class="rttl">{title}</span><span class="rdate">{date}</span></summary>'
                 f'<div class="rbody">{bodyhtml}</div></details>')
         changelog = f'<div class="rels">{"".join(items)}</div>'
     elif d["repo"]:
-        changelog = '<div class="note-line">Релизов в диапазоне не найдено — смотри <b>diff</b> выше (репозиторий помечает изменения тегами, а не GitHub Releases).</div>'
+        changelog = '<div class="note-line">No releases found in range — see the <b>diff</b> above (this repo marks changes with tags, not GitHub Releases).</div>'
     else:
-        changelog = '<div class="note-line">Не на GitHub — ченжлог смотри на сайте проекта вручную.</div>'
+        changelog = '<div class="note-line">Not on GitHub — check the project site for its changelog.</div>'
     return f'<div class="card {"maj" if d["major"] else ""}">{head}{linkrow}{changelog}</div>'
 
-major_html = "".join(card(d) for d in majors) or '<p class="empty">Мажорных скачков нет 🎉</p>'
+major_html = "".join(card(d) for d in majors) or '<p class="empty">No major jumps 🎉</p>'
 minor_html = "".join(card(d) for d in minors)
 
-page = f'''<title>Brew ченжлоги</title>
+page = f'''<title>Brew changelogs</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{{--bg:#f3efe8;--surface:#fbf9f5;--surface-2:#eae5db;--text:#211c15;--muted:#6b6154;--faint:#968b7b;
@@ -195,21 +195,21 @@ footer{{margin-top:40px;padding-top:18px;border-top:1px solid var(--border);colo
 </style>
 <div class="wrap">
 <header>
-<p class="eyebrow">Homebrew · перед обновлением</p>
-<h1>Brew ченжлоги</h1>
-<p class="lede">Что реально меняется в устаревших формулах. Мажорные скачки версий — вероятные ломающие изменения, читай их первыми, потом запускай <code>brew upgrade</code>.</p>
+<p class="eyebrow">Homebrew · before upgrading</p>
+<h1>Brew changelogs</h1>
+<p class="lede">What actually changes in outdated formulae. Major version jumps are likely breaking changes — read those first, then run <code>brew upgrade</code>.</p>
 <div class="stats">
-<div class="stat"><div class="n">{len(data)}</div><div class="l">формул устарело</div></div>
-<div class="stat m"><div class="n">{len(majors)}</div><div class="l">мажорных скачков</div></div>
+<div class="stat"><div class="n">{len(data)}</div><div class="l">formulae outdated</div></div>
+<div class="stat m"><div class="n">{len(majors)}</div><div class="l">major jumps</div></div>
 </div>
 </header>
-<h2>⬆ Мажорные скачки</h2>
-<p class="sub">Смена мажорной версии — здесь чаще всего ломающие изменения. Разверни релизы и прочитай.</p>
+<h2>⬆ Major jumps</h2>
+<p class="sub">A major version change is where breaking changes usually live. Expand the releases and read them.</p>
 {major_html}
-<h2>Минорные и патчи</h2>
-<p class="sub">Обычно безопасны, но полезно глянуть.</p>
+<h2>Minor & patches</h2>
+<p class="sub">Usually safe, but worth a glance.</p>
 {minor_html}
-<footer>Сгенерировано brew-changelog · {len(data)} формул · источник: GitHub Releases через gh. Ничего не обновлялось — запусти <code>brew upgrade</code> вручную.</footer>
+<footer>Generated by brew-changelog · {len(data)} formulae · source: GitHub Releases via gh. Nothing was upgraded — run <code>brew upgrade</code> yourself.</footer>
 </div>'''
 
 with open(out, "w") as f:
@@ -217,5 +217,5 @@ with open(out, "w") as f:
 print(out)
 PYEOF
 
-echo "✅ страница: $OUT" >&2
+echo "✅ page: $OUT" >&2
 command -v open >/dev/null && open "$OUT" || true

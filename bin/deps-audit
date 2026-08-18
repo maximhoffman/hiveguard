@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# deps-audit — проверка зависимостей на известные уязвимости и вредоносные пакеты.
-# Слой 1: osv-scanner (база уязвимостей OSV: npm, PyPI, Go, Rust, …).
-# Слой 2: свежий каталог угроз bumblebee (известные скомпрометированные пакеты).
+# deps-audit — scan dependencies for known vulnerabilities and malicious packages.
+# Layer 1: osv-scanner (OSV vulnerability database: npm, PyPI, Go, Rust, ...).
+# Layer 2: a fresh bumblebee threat catalog (known-compromised packages).
 #
-# Использование:
-#   deps-audit                 # проверить проект в текущей папке (lock-файлы)
-#   deps-audit <путь>          # проверить проект по пути
-#   deps-audit --global        # проверить глобальные установки (npm -g, uv tools)
-#   deps-audit --no-refresh    # не обновлять каталог bumblebee перед проверкой
+# Usage:
+#   deps-audit                 # scan the project in the current directory (lockfiles)
+#   deps-audit <path>          # scan a project at <path>
+#   deps-audit --global        # scan global installs (npm -g, uv tools)
+#   deps-audit --no-refresh    # don't refresh the bumblebee catalog first
 #
-# Запускать ПЕРЕД обновлением зависимостей и после — сравнить, не приехало ли новое.
+# Run it BEFORE and AFTER updating dependencies to compare what changed.
 set -euo pipefail
 
 REFRESH=1; SCOPE="project"; TARGET="$PWD"
@@ -17,40 +17,40 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --global) SCOPE="global" ;;
     --no-refresh) REFRESH=0 ;;
-    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*) echo "неизвестный флаг: $1" >&2; exit 2 ;;
+    -h|--help) grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) TARGET="$1" ;;
   esac; shift
 done
 
-command -v osv-scanner >/dev/null || { echo "нет osv-scanner (brew install osv-scanner)"; exit 1; }
+command -v osv-scanner >/dev/null || { echo "osv-scanner not found (brew install osv-scanner)"; exit 1; }
 
-# --- Слой 2: каталог угроз bumblebee ---------------------------------------
+# --- Layer 2: bumblebee threat catalog --------------------------------------
 if [ "$REFRESH" -eq 1 ] && [ -d "$HOME/bumblebee-src/.git" ]; then
-  echo "🐝 обновляю каталог угроз bumblebee…"
+  echo "🐝 bumblebee: refreshing threat catalog..."
   git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null \
-    && echo "   каталог свежий" \
-    || echo "   не удалось обновить (offline?) — использую что есть" >&2
+    && echo "   catalog up to date" \
+    || echo "   could not refresh (offline?) — using what's on disk" >&2
 fi
 
-# --- Слой 1: osv-scanner ----------------------------------------------------
+# --- Layer 1: osv-scanner ---------------------------------------------------
 run_osv() {  # $1 = dir
   echo; echo "🔎 osv-scanner: $1"
-  # exit 1 = найдены уязвимости; не роняем скрипт из-за set -e
+  # exit 1 = vulnerabilities found; don't let set -e kill the script
   osv-scanner scan --recursive "$1" 2>/dev/null || true
 }
 
 if [ "$SCOPE" = "global" ]; then
-  echo "== Глобальные установки =="
+  echo "== Global installs =="
   NPM_G="$(npm root -g 2>/dev/null || echo /opt/homebrew/lib/node_modules)"
   [ -d "$NPM_G" ] && run_osv "$NPM_G"
   UV_TOOLS="$HOME/.local/share/uv/tools"
   [ -d "$UV_TOOLS" ] && run_osv "$UV_TOOLS"
-  echo; echo "ℹ Homebrew-формулы osv-scanner не покрывает — для них ченжлоги смотри через brew-changelog."
+  echo; echo "ℹ️  Homebrew formulae are not covered by osv-scanner — use brew-changelog for those."
 else
-  [ -d "$TARGET" ] || { echo "нет папки: $TARGET"; exit 1; }
-  echo "== Проект: $TARGET =="
+  [ -d "$TARGET" ] || { echo "no such directory: $TARGET"; exit 1; }
+  echo "== Project: $TARGET =="
   run_osv "$TARGET"
 fi
 
-echo; echo "✅ проверка завершена. Пусто выше = известных проблем нет (но нулевого дня это не исключает)."
+echo; echo "✅ done. Empty output above = no known issues (does not rule out a zero-day)."
