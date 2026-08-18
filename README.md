@@ -83,6 +83,13 @@ Options:
 The installer symlinks `bin/*` into `~/bin`, backs up any pre-existing files, and
 writes reports/logs to `~/.hiveguard/`.
 
+**`~/bin` must be on your `PATH`.** If it isn't (the installer warns you), the commands
+only resolve by full path. Add this to your `~/.zshrc` and open a new terminal:
+
+```bash
+export PATH="$HOME/bin:$PATH"
+```
+
 ### Updating
 
 The tools in `~/bin` are **symlinks** into your clone, so updating is just a pull:

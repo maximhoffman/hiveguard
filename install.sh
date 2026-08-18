@@ -53,6 +53,11 @@ for tool in hiveguard safe-add deps-audit osv-daily brew-changelog; do
   fi
   ln -sf "$REPO/bin/$tool" "$target"; ok "$tool → $REPO/bin/$tool"
 done
+case ":$PATH:" in
+  *":$BIN:"*) ok "$BIN is on PATH" ;;
+  *) warn "$BIN is NOT on your PATH — commands resolve only by full path until you add:"
+     echo "     export PATH=\"\$HOME/bin:\$PATH\"    # in ~/.zshrc, then open a new terminal" ;;
+esac
 
 # ── 3. bumblebee guard (install-time gate) ──────────────────────────────────
 say "bumblebee guard (shell install-gate)"
