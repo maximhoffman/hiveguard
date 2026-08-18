@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# safe-add — устанавливает пакет ТОЛЬКО после проверки по базе OSV.
+# Резолвит дерево зависимостей БЕЗ установки → сканирует osv-scanner → ставит, если чисто.
+# Слои: OSV (эта проверка) + bumblebee (включается сам на npm/pip/go/cargo при install).
+#
+# Политика:
+#   • MAL-* (вредоносный пакет)     → ЖЁСТКИЙ СТОП
+#   • critical (CVSS ≥ 9)           → СТОП (обойти: --force)
+#   • прочие CVE                    → предупреждение, установка продолжается
+#
+# Использование:
+#   safe-add npm  react-router
+#   safe-add npm  react-router -g        # доп. аргументы уходят в install
+#   safe-add pip  requests
+#   safe-add uv   serena-agent           # uv tool install
+#   safe-add gem  nokogiri               # coarse-проверка (по имени, без дерева)
+#   safe-add cargo ripgrep
+#   Флаги: --force (ставить несмотря на critical), --check-only (только проверить)
+#
+# Экосистемы с полным деревом: npm, pnpm, yarn, bun, pip, uv.
+# Coarse (только верхний пакет через OSV API): gem, cargo, go, composer.
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+FORCE=0; CHECK_ONLY=0; ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    --check-only) CHECK_ONLY=1 ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+[ "${#ARGS[@]}" -ge 2 ] || { echo "нужно: safe-add <менеджер> <пакет> [аргументы]"; exit 2; }
+MGR="${ARGS[0]}"; PKG="${ARGS[1]}"; EXTRA=("${ARGS[@]:2}")
+
+command -v osv-scanner >/dev/null || { echo "нет osv-scanner (brew install osv-scanner)"; exit 1; }
+command -v jq >/dev/null || { echo "нужен jq"; exit 1; }
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; BLD=$'\033[1m'; NC=$'\033[0m'
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# ── резолв дерева без установки → путь к lock/requirements ──────────────────
+resolve_lockfile() {
+  case "$MGR" in
+    npm|pnpm|yarn|bun)
+      ( cd "$TMP" && npm init -y >/dev/null 2>&1 \
+        && npm install "$PKG" --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 ) || return 1
+      [ -f "$TMP/package-lock.json" ] && echo "$TMP/package-lock.json" || return 1 ;;
+    pip)
+      python3 -m pip install "$PKG" --dry-run --quiet --report "$TMP/r.json" >/dev/null 2>&1 || return 1
+      jq -r '.install[]?.metadata | "\(.name)==\(.version)"' "$TMP/r.json" > "$TMP/requirements.txt" 2>/dev/null
+      [ -s "$TMP/requirements.txt" ] && echo "$TMP/requirements.txt" || return 1 ;;
+    uv)
+      printf '%s\n' "$PKG" | uv pip compile - -o "$TMP/requirements.txt" --quiet 2>/dev/null || return 1
+      [ -s "$TMP/requirements.txt" ] && echo "$TMP/requirements.txt" || return 1 ;;
+    *) return 2 ;;  # coarse-режим
+  esac
+}
+
+# ── coarse-проверка одного пакета через OSV API ─────────────────────────────
+osv_ecosystem() {
+  case "$MGR" in
+    gem) echo "RubyGems" ;; cargo) echo "crates.io" ;; go) echo "Go" ;;
+    composer) echo "Packagist" ;; *) echo "" ;;
+  esac
+}
+
+VERDICT="clean"  # clean | warn | block
+print_findings_lockfile() {  # $1 = json
+  local j="$1"
+  local mal crit high total
+  mal=$(jq '[.results[]?.packages[]?.vulnerabilities[]?.id | select(startswith("MAL-"))]|length' <<<"$j")
+  crit=$(jq '[.results[]?.packages[]?.groups[]?.max_severity | (tonumber? // 0) | select(.>=9)]|length' <<<"$j")
+  high=$(jq '[.results[]?.packages[]?.groups[]?.max_severity | (tonumber? // 0) | select(.>=7 and .<9)]|length' <<<"$j")
+  total=$(jq '[.results[]?.packages[]?.vulnerabilities[]?]|length' <<<"$j")
+  local pkgs; pkgs=$(jq '[.results[]?.packages[]?]|length' <<<"$j")
+  echo "${DIM}уязвимых пакетов в дереве: $pkgs${NC}"
+  if [ "$total" -gt 0 ]; then
+    jq -r '
+      .results[]?.packages[]? as $p | ($p.vulnerabilities // []) | select(length>0) |
+      ($p.package.name) as $n | ($p.package.version) as $v |
+      ([$p.groups[]?.max_severity | (tonumber? // 0)] | max // 0) as $s |
+      ([.[].id] | map(select(startswith("MAL-"))) | length) as $m |
+      "\($n)@\($v)\t\($s)\t\($m)\t\([.[].id]|join(","))"
+    ' <<<"$j" 2>/dev/null | while IFS=$'\t' read -r nv sev malc ids; do
+      tag="CVE"; col="$YEL"
+      awk "BEGIN{exit !($sev>=9)}" && { tag="CRIT"; col="$RED"; }
+      [ "${malc:-0}" -gt 0 ] && { tag="MAL"; col="$RED$BLD"; }
+      printf "  %s%-5s%s %-28s %s\n" "$col" "$tag" "$NC" "$nv" "${DIM}${ids}${NC}"
+    done
+  fi
+  echo
+  if [ "$mal" -gt 0 ]; then
+    echo "${RED}${BLD}✖ ВРЕДОНОСНЫЕ пакеты (MAL): $mal — установка заблокирована${NC}"; VERDICT="block"
+  elif [ "$crit" -gt 0 ]; then
+    echo "${RED}✖ критических (CVSS≥9): $crit${NC}"; VERDICT="block"
+  elif [ "$total" -gt 0 ]; then
+    echo "${YEL}⚠ уязвимости есть ($total; high: $high), но не критичные — продолжаю${NC}"; VERDICT="warn"
+  else
+    echo "${GRN}✓ чисто по OSV${NC}"; VERDICT="clean"
+  fi
+}
+
+print_findings_api() {  # coarse
+  local eco; eco="$(osv_ecosystem)"
+  [ -n "$eco" ] || { echo "${YEL}⚠ экосистема '$MGR' не поддержана для проверки — ставлю без OSV-гейта${NC}"; VERDICT="warn"; return; }
+  echo "${DIM}coarse-режим: проверяю только сам пакет '$PKG' по OSV API (без дерева)${NC}"
+  local body resp mal total
+  body=$(printf '{"package":{"name":"%s","ecosystem":"%s"}}' "$PKG" "$eco")
+  resp=$(curl -s -X POST 'https://api.osv.dev/v1/query' -H 'Content-Type: application/json' -d "$body" || echo '{}')
+  total=$(jq '(.vulns // [])|length' <<<"$resp" 2>/dev/null || echo 0)
+  mal=$(jq '[(.vulns // [])[].id | select(startswith("MAL-"))]|length' <<<"$resp" 2>/dev/null || echo 0)
+  if [ "${mal:-0}" -gt 0 ]; then
+    echo "${RED}${BLD}✖ пакет числится ВРЕДОНОСНЫМ (MAL) в OSV — стоп${NC}"; VERDICT="block"
+  elif [ "${total:-0}" -gt 0 ]; then
+    echo "${YEL}⚠ у пакета есть записи в OSV ($total) — глянь https://osv.dev/list?q=$PKG${NC}"; VERDICT="warn"
+  else
+    echo "${GRN}✓ по OSV записей нет${NC}"; VERDICT="clean"
+  fi
+}
+
+# ── реальная установка (bumblebee-гейт включается сам) ──────────────────────
+do_install() {
+  # shellcheck disable=SC1090
+  source "$HOME/bin/bumblebee-guard.sh" 2>/dev/null || true
+  echo "${BLD}→ ставлю: $MGR $PKG ${EXTRA[*]:-}${NC}"
+  case "$MGR" in
+    npm)  npm install "$PKG" "${EXTRA[@]}" ;;
+    pnpm) pnpm add "$PKG" "${EXTRA[@]}" ;;
+    yarn) yarn add "$PKG" "${EXTRA[@]}" ;;
+    bun)  bun add "$PKG" "${EXTRA[@]}" ;;
+    pip)  python3 -m pip install "$PKG" "${EXTRA[@]}" ;;
+    uv)   uv tool install "$PKG" "${EXTRA[@]}" ;;
+    gem)  gem install "$PKG" "${EXTRA[@]}" ;;
+    cargo) cargo install "$PKG" "${EXTRA[@]}" ;;
+    go)   go install "$PKG" "${EXTRA[@]}" ;;
+    *) echo "не знаю, как ставить '$MGR'"; return 1 ;;
+  esac
+}
+
+echo "${BLD}safe-add:${NC} проверяю ${BLD}$PKG${NC} (${MGR}) по OSV…"
+if lf="$(resolve_lockfile)"; then
+  json=$(osv-scanner scan source -L "$lf" --format json 2>/dev/null) || true  # exit 1 = найдены уязвимости, это норма
+  [ -n "$json" ] || json='{"results":[]}'
+  print_findings_lockfile "$json"
+else
+  rc=$?
+  if [ "$rc" -eq 2 ]; then print_findings_api
+  else echo "${YEL}⚠ не удалось построить дерево (резолв упал) — ставить без гейта рискованно${NC}"; VERDICT="warn"; fi
+fi
+
+echo
+if [ "$VERDICT" = "block" ] && [ "$FORCE" -ne 1 ]; then
+  echo "${RED}Установка отменена. Обойти осознанно: добавь --force${NC}"; exit 1
+fi
+[ "$VERDICT" = "block" ] && echo "${YEL}--force: ставлю несмотря на critical/MAL${NC}"
+if [ "$CHECK_ONLY" -eq 1 ]; then echo "${DIM}--check-only: установку пропускаю${NC}"; exit 0; fi
+do_install

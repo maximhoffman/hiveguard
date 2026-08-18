@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# deps-audit — проверка зависимостей на известные уязвимости и вредоносные пакеты.
+# Слой 1: osv-scanner (база уязвимостей OSV: npm, PyPI, Go, Rust, …).
+# Слой 2: свежий каталог угроз bumblebee (известные скомпрометированные пакеты).
+#
+# Использование:
+#   deps-audit                 # проверить проект в текущей папке (lock-файлы)
+#   deps-audit <путь>          # проверить проект по пути
+#   deps-audit --global        # проверить глобальные установки (npm -g, uv tools)
+#   deps-audit --no-refresh    # не обновлять каталог bumblebee перед проверкой
+#
+# Запускать ПЕРЕД обновлением зависимостей и после — сравнить, не приехало ли новое.
+set -euo pipefail
+
+REFRESH=1; SCOPE="project"; TARGET="$PWD"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --global) SCOPE="global" ;;
+    --no-refresh) REFRESH=0 ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "неизвестный флаг: $1" >&2; exit 2 ;;
+    *) TARGET="$1" ;;
+  esac; shift
+done
+
+command -v osv-scanner >/dev/null || { echo "нет osv-scanner (brew install osv-scanner)"; exit 1; }
+
+# --- Слой 2: каталог угроз bumblebee ---------------------------------------
+if [ "$REFRESH" -eq 1 ] && [ -d "$HOME/bumblebee-src/.git" ]; then
+  echo "🐝 обновляю каталог угроз bumblebee…"
+  git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null \
+    && echo "   каталог свежий" \
+    || echo "   не удалось обновить (offline?) — использую что есть" >&2
+fi
+
+# --- Слой 1: osv-scanner ----------------------------------------------------
+run_osv() {  # $1 = dir
+  echo; echo "🔎 osv-scanner: $1"
+  # exit 1 = найдены уязвимости; не роняем скрипт из-за set -e
+  osv-scanner scan --recursive "$1" 2>/dev/null || true
+}
+
+if [ "$SCOPE" = "global" ]; then
+  echo "== Глобальные установки =="
+  NPM_G="$(npm root -g 2>/dev/null || echo /opt/homebrew/lib/node_modules)"
+  [ -d "$NPM_G" ] && run_osv "$NPM_G"
+  UV_TOOLS="$HOME/.local/share/uv/tools"
+  [ -d "$UV_TOOLS" ] && run_osv "$UV_TOOLS"
+  echo; echo "ℹ Homebrew-формулы osv-scanner не покрывает — для них ченжлоги смотри через brew-changelog."
+else
+  [ -d "$TARGET" ] || { echo "нет папки: $TARGET"; exit 1; }
+  echo "== Проект: $TARGET =="
+  run_osv "$TARGET"
+fi
+
+echo; echo "✅ проверка завершена. Пусто выше = известных проблем нет (но нулевого дня это не исключает)."

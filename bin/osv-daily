@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# osv-daily — ежедневная проверка всех проектов на уязвимости (запускается launchd).
+# Один скан → JSON → компактный HTML-отчёт + уведомление macOS при находках.
+# Также обновляет каталог угроз bumblebee, чтобы install-гейт оставался свежим.
+#
+#   osv-daily            # скан ~/Projects
+#   osv-daily <путь>     # скан другой папки
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+TARGET="${1:-$HOME/Projects}"
+REPORT="$HOME/.hiveguard/osv-projects.html"
+JSON="$(mktemp)"; trap 'rm -f "$JSON"' EXIT
+LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
+STAMP="$(date '+%Y-%m-%d %H:%M')"
+
+command -v osv-scanner >/dev/null || { echo "нет osv-scanner"; exit 1; }
+
+# слой bumblebee: держим каталог свежим (install-гейт)
+if [ -d "$HOME/bumblebee-src/.git" ]; then
+  git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null || true
+fi
+
+# один скан всех проектов
+osv-scanner scan source --recursive --format json "$TARGET" > "$JSON" 2>/dev/null || true
+[ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
+
+# счётчики для уведомления — каждый отдельным устойчивым запросом (tonumber? // 0)
+jqn() { jq -r "$1" "$JSON" 2>/dev/null || echo 0; }
+VULNS=$(jqn '[.results[]?.packages[]? | (.vulnerabilities // []) | length] | add // 0')
+PKGS=$(jqn '[.results[]?.packages[]? | select(((.vulnerabilities // [])|length)>0)] | length')
+PROJECTS=$(jqn '[.results[]? | select(([.packages[]?.vulnerabilities[]?]|length)>0) | .source.path] | unique | length')
+CRIT=$(jqn '[.results[]?.packages[]?.groups[]?.max_severity | (tonumber? // 0) | select(.>=9)] | length')
+VULNS=${VULNS:-0}; PKGS=${PKGS:-0}; PROJECTS=${PROJECTS:-0}; CRIT=${CRIT:-0}
+
+# компактный HTML-отчёт
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" \
+  VULNS="$VULNS" PKGS="$PKGS" PROJECTS="$PROJECTS" CRIT="$CRIT" python3 <<'PYEOF'
+import json, os, html, re
+d = json.load(open(os.environ["JSON"]))
+def ig(k, dv=""):
+    return os.environ.get(k, dv)
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
+
+def sev_bucket(score):
+    try: s = float(score)
+    except: return ("low", "LOW")
+    if s >= 9: return ("crit", "CRIT")
+    if s >= 7: return ("high", "HIGH")
+    if s >= 4: return ("med",  "MED")
+    return ("low", "LOW")
+
+projects = []
+for r in d.get("results", []):
+    src = r.get("source", {}).get("path", "")
+    pkgs = []
+    for p in r.get("packages", []):
+        vulns = p.get("vulnerabilities") or []
+        if not vulns: continue
+        info = p.get("package", {})
+        maxsev = max((float(g.get("max_severity","0") or 0) for g in (p.get("groups") or [])), default=0.0)
+        fixes = []
+        for v in vulns:
+            for a in v.get("affected", []) or []:
+                for rng in a.get("ranges", []) or []:
+                    for e in rng.get("events", []) or []:
+                        if e.get("fixed"): fixes.append(e["fixed"])
+        fix = max(fixes, key=vtuple) if fixes else ""
+        ids = []
+        for v in vulns:
+            ids.append(v.get("id",""))
+        pkgs.append({
+            "name": info.get("name",""), "version": info.get("version",""),
+            "eco": info.get("ecosystem",""), "sev": maxsev, "fix": fix,
+            "count": len(vulns), "ids": ids,
+            "summary": (vulns[0].get("summary") or "")[:160],
+        })
+    if pkgs:
+        pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        projects.append({"src": src, "pkgs": pkgs,
+                         "maxsev": max(p["sev"] for p in pkgs)})
+projects.sort(key=lambda x: x["maxsev"], reverse=True)
+
+def short(src):
+    s = src.replace(os.path.expanduser("~/Projects/"), "")
+    return html.escape(s)
+
+rows_html = []
+for pr in projects:
+    items = []
+    for p in pr["pkgs"]:
+        cls, lbl = sev_bucket(p["sev"])
+        idlinks = " ".join(
+            f'<a href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
+            for i in p["ids"][:4])
+        more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"])>4 else ""
+        fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
+        items.append(
+            f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
+            f'<td class="mono">{html.escape(p["version"])}</td>'
+            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span></td>'
+            f'<td class="mono fix">{fix}</td>'
+            f'<td class="ids">{idlinks}{more}</td></tr>')
+    rows_html.append(
+        f'<section class="proj"><h3>{short(pr["src"])} <span class="cnt">{len(pr["pkgs"])} пакет(ов)</span></h3>'
+        f'<div class="tblwrap"><table><thead><tr><th>Пакет</th><th>Версия</th><th>Макс. severity</th><th>Фикс в</th><th>ID</th></tr></thead>'
+        f'<tbody>{"".join(items)}</tbody></table></div></section>')
+
+body = "".join(rows_html) or '<p class="clean">✅ Известных уязвимостей не найдено.</p>'
+
+page = f'''<title>OSV — проекты</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{{--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
+--border:#dae0e4;--border-strong:#c6ced3;--accent:#2367a8;
+--crit:#c02636;--crit-s:#f5dade;--high:#c85a1c;--high-s:#f4e2d2;--med:#a9861f;--med-s:#f1e9d0;--low:#4a7a52;--low-s:#dfeadf;
+--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}}
+@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;
+--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;--border:#242d32;--border-strong:#333e44;--accent:#5199db;
+--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}}}
+:root[data-theme="dark"]{{--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;
+--border:#242d32;--border-strong:#333e44;--accent:#5199db;--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;
+--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}}
+.wrap{{max-width:940px;margin:0 auto;padding:0 20px 90px}}
+header{{padding:44px 0 20px;border-bottom:1px solid var(--border)}}
+.eyebrow{{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 10px}}
+h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
+.lede{{color:var(--muted);font-size:15px;margin:0}}
+.stats{{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}}
+.stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 14px;min-width:96px}}
+.stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
+.stat.crit .n{{color:var(--crit)}}
+.proj{{margin-top:30px}}
+.proj h3{{font-family:var(--mono);font-size:15px;margin:0 0 10px;display:flex;align-items:baseline;gap:10px}}
+.cnt{{font-size:12px;color:var(--faint);font-weight:400}}
+.tblwrap{{overflow-x:auto;border:1px solid var(--border);border-radius:10px}}
+table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:600px}}
+th,td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}}
+th{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface-2)}}
+tr:last-child td{{border-bottom:none}}
+.pk{{font-family:var(--mono);font-weight:600}}.eco{{color:var(--faint);font-weight:400;margin-left:7px;font-size:11px}}
+.mono{{font-family:var(--mono);font-variant-numeric:tabular-nums}}
+.fix{{color:var(--low)}}.none{{color:var(--faint)}}
+.sev{{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}}
+.sev.crit{{background:var(--crit-s);color:var(--crit)}}.sev.high{{background:var(--high-s);color:var(--high)}}
+.sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
+.ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.more{{color:var(--faint)}}
+.clean{{color:var(--low);font-size:16px;margin-top:30px}}
+footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
+</style>
+<div class="wrap">
+<header>
+<p class="eyebrow">osv-daily · {html.escape(ig("STAMP"))}</p>
+<h1>Уязвимости в проектах</h1>
+<p class="lede">Скан <code>{html.escape(ig("TARGET"))}</code> по базе OSV. Отсортировано по критичности. Клик по ID — карточка на osv.dev.</p>
+<div class="stats">
+<div class="stat"><div class="n">{ig("PROJECTS","0")}</div><div class="l">проектов затронуто</div></div>
+<div class="stat"><div class="n">{ig("PKGS","0")}</div><div class="l">пакетов</div></div>
+<div class="stat"><div class="n">{ig("VULNS","0")}</div><div class="l">уязвимостей</div></div>
+<div class="stat crit"><div class="n">{ig("CRIT","0")}</div><div class="l">критических</div></div>
+</div>
+</header>
+{body}
+<footer>osv-daily · один скан → отчёт + уведомление. bumblebee-каталог обновляется тем же запуском. Патчи ставь сам: обнови зависимость до «Фикс в».</footer>
+</div>'''
+open(os.environ["OUT"],"w").write(page)
+PYEOF
+
+echo "[$STAMP] projects=$PROJECTS pkgs=$PKGS vulns=$VULNS crit=$CRIT → $REPORT" >> "$LOGDIR/osv-daily.log"
+
+# уведомление при находках
+if [ "${VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
+  terminal-notifier -title "osv-daily: найдены уязвимости" \
+    -message "$PROJECTS проект(ов), $PKGS пакет(ов), $VULNS всего ($CRIT крит.)" \
+    -open "file://$REPORT" -sender com.apple.Terminal 2>/dev/null || true
+fi
+echo "готово: $VULNS уязвимостей в $PROJECTS проектах → $REPORT"

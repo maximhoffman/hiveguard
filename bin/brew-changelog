@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# brew-changelog — собирает ченжлоги по устаревшим brew-формулам в одну HTML-страницу.
+# Мажорные скачки версий подсвечиваются. НИЧЕГО НЕ ОБНОВЛЯЕТ — только читает.
+#
+# Использование:
+#   brew-changelog                 # все устаревшие формулы → страница + открыть
+#   brew-changelog --no-update     # не запускать brew update (быстрее)
+#   brew-changelog -o /path.html   # свой путь вывода
+#   ONLY=ada-url,ast-grep brew-changelog   # только эти (для проверки)
+#
+# Требует: brew, jq. Ченжлоги тянутся через gh (если авторизован); иначе — ссылки.
+set -euo pipefail
+
+DO_UPDATE=1
+OUT="$HOME/.claude/pages/brew-changelog-$(date +%Y%m%d-%H%M).html"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-update) DO_UPDATE=0 ;;
+    -o) shift; OUT="$1" ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "неизвестный флаг: $1" >&2; exit 2 ;;
+  esac; shift
+done
+
+command -v brew >/dev/null || { echo "нет brew"; exit 1; }
+command -v jq   >/dev/null || { echo "нужен jq (brew install jq)"; exit 1; }
+HAVE_GH=0
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then HAVE_GH=1; fi
+mkdir -p "$(dirname "$OUT")"
+
+if [ "$DO_UPDATE" -eq 1 ]; then echo "🍺 brew update…" >&2; brew update >/dev/null 2>&1 || true; fi
+
+OUTDATED=$(brew outdated --json=v2 2>/dev/null | jq -c '.formulae')
+NAMES=$(jq -r '.[].name' <<<"$OUTDATED")
+if [ -n "${ONLY:-}" ]; then
+  NAMES=$(tr ',' '\n' <<<"$ONLY")
+fi
+[ -z "$NAMES" ] && { echo "нечего обновлять — всё свежее 🎉"; exit 0; }
+N=$(grep -c . <<<"$NAMES")
+
+# известные не-GitHub формулы → их реальный репозиторий (bash 3.2 без assoc-массивов)
+repo_override() {
+  case "$1" in
+    node) echo "nodejs/node" ;;
+    python@3.14|python@3.13|python@3.12) echo "python/cpython" ;;
+    go) echo "golang/go" ;;
+    curl) echo "curl/curl" ;;
+    gnupg) echo "gpg/gnupg" ;;
+    perl) echo "Perl/perl5" ;;
+    llvm) echo "llvm/llvm-project" ;;
+    ffmpeg) echo "FFmpeg/FFmpeg" ;;
+    imagemagick) echo "ImageMagick/ImageMagick" ;;
+    *) echo "" ;;
+  esac
+}
+
+# батч-инфо: name → stable_url, homepage (один вызов на все)
+INFO=$(brew info --json=v2 $NAMES 2>/dev/null | jq -c '[.formulae[] | {name, url:.urls.stable.url, homepage}]')
+
+ACC="$(mktemp)"; TMPREL="$(mktemp)"; DATAJSON="$(mktemp)"
+trap 'rm -f "$ACC" "$TMPREL" "$DATAJSON"' EXIT
+i=0
+while IFS= read -r name; do
+  [ -z "$name" ] && continue
+  old=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.installed_versions[0] // empty' <<<"$OUTDATED")
+  new=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.current_version // empty' <<<"$OUTDATED")
+  [ -z "$new" ] && new=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.url' <<<"$INFO" >/dev/null 2>&1; echo "")
+  url=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.url // empty'      <<<"$INFO")
+  home=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.homepage // empty' <<<"$INFO")
+  oldmaj=${old%%.*}; newmaj=${new%%.*}
+  major=false; [ -n "$old" ] && [ "$oldmaj" != "$newmaj" ] && major=true
+
+  repo="$(repo_override "$name")"
+  if [ -z "$repo" ]; then
+    repo=$(sed -nE 's#.*github.com/([^/]+)/([^/?#]+).*#\1/\2#p' <<<"$url")
+    repo=${repo%.git}
+  fi
+
+  echo '[]' > "$TMPREL"
+  if [ "$HAVE_GH" -eq 1 ] && [ -n "$repo" ]; then
+    gh api "repos/$repo/releases?per_page=100" 2>/dev/null \
+      | jq -c '[.[] | {tag:.tag_name, name:.name, date:.published_at, url:.html_url, body:((.body // "")[0:1600])}]' \
+      > "$TMPREL" 2>/dev/null || echo '[]' > "$TMPREL"
+    [ -s "$TMPREL" ] || echo '[]' > "$TMPREL"
+  fi
+  compare=""
+  [ -n "$repo" ] && [ -n "$old" ] && compare="https://github.com/$repo/compare/v$old...v$new"
+
+  jq -c -n \
+    --arg name "$name" --arg old "$old" --arg new "$new" --argjson major "$major" \
+    --arg repo "$repo" --arg home "$home" --arg compare "$compare" --slurpfile releases "$TMPREL" \
+    '{name:$name,old:$old,new:$new,major:$major,repo:$repo,home:$home,compare:$compare,releases:($releases[0] // [])}' \
+    >> "$ACC"
+  i=$((i+1)); printf '  [%d/%d] %s%s\n' "$i" "$N" "$name" "$([ "$major" = true ] && echo '  ⬆ MAJOR')" >&2
+done <<<"$NAMES"
+
+jq -s '.' "$ACC" > "$DATAJSON"
+DATAJSON="$DATAJSON" OUT="$OUT" python3 <<'PYEOF'
+import json, os, sys, html, re
+
+data = json.load(open(os.environ["DATAJSON"]))
+out  = os.environ["OUT"]
+
+def ver_tuple(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v)[:4]) or (0,)
+
+def in_range(tag, old, new):
+    t = ver_tuple(tag)
+    return ver_tuple(old) < t <= ver_tuple(new)
+
+def md_light(s):
+    s = html.escape(s or "")
+    s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+    s = re.sub(r'^#{1,6}\s*(.+)$', r'<b>\1</b>', s, flags=re.M)
+    s = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', s)
+    return s
+
+majors = [d for d in data if d["major"]]
+minors = [d for d in data if not d["major"]]
+
+def card(d):
+    rels = [r for r in d["releases"] if r.get("tag") and in_range(r["tag"], d["old"], d["new"])]
+    rels.sort(key=lambda r: ver_tuple(r["tag"]), reverse=True)
+    chip = '<span class="major">MAJOR</span>' if d["major"] else ''
+    head = (f'<div class="cardhead"><div class="nm">{html.escape(d["name"])}{chip}</div>'
+            f'<div class="ver">{html.escape(d["old"])} <span class="arr">→</span> '
+            f'<b>{html.escape(d["new"])}</b></div></div>')
+    links = []
+    if d["repo"]:    links.append(f'<a href="https://github.com/{html.escape(d["repo"])}" target="_blank" rel="noopener">repo</a>')
+    if d["compare"]: links.append(f'<a href="{html.escape(d["compare"])}" target="_blank" rel="noopener">diff {html.escape(d["old"])}…{html.escape(d["new"])}</a>')
+    if d["home"]:    links.append(f'<a href="{html.escape(d["home"])}" target="_blank" rel="noopener">сайт</a>')
+    linkrow = f'<div class="links">{" · ".join(links)}</div>' if links else ''
+    if rels:
+        items = []
+        for r in rels[:8]:
+            title = html.escape(r.get("name") or r.get("tag") or "")
+            date  = (r.get("date") or "")[:10]
+            body  = (r.get("body") or "").strip()
+            body  = body[:1400] + ("…" if len(body) > 1400 else "")
+            bodyhtml = md_light(body).replace("\n", "<br>") if body else '<span class="empty">— без описания —</span>'
+            items.append(
+                f'<details class="rel"><summary><span class="rtag">{html.escape(r.get("tag",""))}</span>'
+                f'<span class="rttl">{title}</span><span class="rdate">{date}</span></summary>'
+                f'<div class="rbody">{bodyhtml}</div></details>')
+        changelog = f'<div class="rels">{"".join(items)}</div>'
+    elif d["repo"]:
+        changelog = '<div class="note-line">Релизов в диапазоне не найдено — смотри <b>diff</b> выше (репозиторий помечает изменения тегами, а не GitHub Releases).</div>'
+    else:
+        changelog = '<div class="note-line">Не на GitHub — ченжлог смотри на сайте проекта вручную.</div>'
+    return f'<div class="card {"maj" if d["major"] else ""}">{head}{linkrow}{changelog}</div>'
+
+major_html = "".join(card(d) for d in majors) or '<p class="empty">Мажорных скачков нет 🎉</p>'
+minor_html = "".join(card(d) for d in minors)
+
+page = f'''<title>Brew ченжлоги</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{{--bg:#f3efe8;--surface:#fbf9f5;--surface-2:#eae5db;--text:#211c15;--muted:#6b6154;--faint:#968b7b;
+--border:#e0d9cc;--border-strong:#cfc6b5;--accent:#a8621f;--accent-soft:#f0e0cd;--major:#b5342a;--major-soft:#f4dcd8;
+--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}}
+@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#15120c;--surface:#1e1a12;--surface-2:#28231a;
+--text:#ece5d8;--muted:#a99d8a;--faint:#7a7061;--border:#2f2a1f;--border-strong:#413a2c;--accent:#d99548;--accent-soft:#33240f;
+--major:#e56b60;--major-soft:#341613;}}}}
+:root[data-theme="dark"]{{--bg:#15120c;--surface:#1e1a12;--surface-2:#28231a;--text:#ece5d8;--muted:#a99d8a;--faint:#7a7061;
+--border:#2f2a1f;--border-strong:#413a2c;--accent:#d99548;--accent-soft:#33240f;--major:#e56b60;--major-soft:#341613;}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}}
+.wrap{{max-width:900px;margin:0 auto;padding:0 20px 90px}}
+header{{padding:48px 0 22px;border-bottom:1px solid var(--border)}}
+.eyebrow{{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 12px}}
+h1{{font-size:clamp(28px,5vw,40px);margin:0 0 12px;letter-spacing:-.02em}}
+.lede{{color:var(--muted);font-size:16px;margin:0;max-width:60ch}}
+.stats{{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}}
+.stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 13px}}
+.stat .n{{font-family:var(--mono);font-size:20px;font-weight:600}}.stat .l{{font-size:12px;color:var(--muted)}}
+.stat.m .n{{color:var(--major)}}
+h2{{font-size:20px;margin:38px 0 4px}}.sub{{color:var(--muted);font-size:14px;margin:0 0 16px}}
+.card{{border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:15px 17px;margin-bottom:12px}}
+.card.maj{{border-color:var(--major);border-left-width:3px}}
+.cardhead{{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}}
+.nm{{font-family:var(--mono);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}}
+.major{{font-family:var(--mono);font-size:10px;letter-spacing:.08em;background:var(--major-soft);color:var(--major);padding:2px 6px;border-radius:5px}}
+.ver{{font-family:var(--mono);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}}.ver b{{color:var(--text)}}.arr{{color:var(--faint)}}
+.links{{margin-top:6px;font-family:var(--mono);font-size:12px}}.links a{{color:var(--accent);text-decoration:none}}.links a:hover{{text-decoration:underline}}
+.rels{{margin-top:12px;display:flex;flex-direction:column;gap:5px}}
+.rel{{border:1px solid var(--border);border-radius:8px;background:var(--bg);overflow:hidden}}
+.rel summary{{cursor:pointer;padding:8px 11px;display:flex;gap:10px;align-items:baseline;font-size:13px;list-style:none}}
+.rel summary::-webkit-details-marker{{display:none}}
+.rtag{{font-family:var(--mono);font-weight:600;color:var(--accent)}}.rttl{{flex:1;color:var(--text)}}.rdate{{font-family:var(--mono);font-size:11px;color:var(--faint)}}
+.rbody{{padding:0 13px 12px;font-size:13px;color:var(--muted);border-top:1px solid var(--border)}}
+.rbody code{{font-family:var(--mono);font-size:.9em;background:var(--surface-2);padding:1px 4px;border-radius:3px}}
+.rbody b{{color:var(--text)}}
+.note-line{{margin-top:10px;font-size:13px;color:var(--muted)}}
+.empty{{color:var(--faint);font-style:italic}}
+footer{{margin-top:40px;padding-top:18px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
+</style>
+<div class="wrap">
+<header>
+<p class="eyebrow">Homebrew · перед обновлением</p>
+<h1>Brew ченжлоги</h1>
+<p class="lede">Что реально меняется в устаревших формулах. Мажорные скачки версий — вероятные ломающие изменения, читай их первыми, потом запускай <code>brew upgrade</code>.</p>
+<div class="stats">
+<div class="stat"><div class="n">{len(data)}</div><div class="l">формул устарело</div></div>
+<div class="stat m"><div class="n">{len(majors)}</div><div class="l">мажорных скачков</div></div>
+</div>
+</header>
+<h2>⬆ Мажорные скачки</h2>
+<p class="sub">Смена мажорной версии — здесь чаще всего ломающие изменения. Разверни релизы и прочитай.</p>
+{major_html}
+<h2>Минорные и патчи</h2>
+<p class="sub">Обычно безопасны, но полезно глянуть.</p>
+{minor_html}
+<footer>Сгенерировано brew-changelog · {len(data)} формул · источник: GitHub Releases через gh. Ничего не обновлялось — запусти <code>brew upgrade</code> вручную.</footer>
+</div>'''
+
+with open(out, "w") as f:
+    f.write(page)
+print(out)
+PYEOF
+
+echo "✅ страница: $OUT" >&2
+command -v open >/dev/null && open "$OUT" || true

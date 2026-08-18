@@ -1,0 +1,6 @@
+# local scan artifacts / reports
+*.report.html
+/tmp/
+.DS_Store
+# generated launchd plist (created by install.sh)
+launchd/*.plist
