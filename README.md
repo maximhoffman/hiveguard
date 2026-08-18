@@ -40,6 +40,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `deps-audit` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
 | `osv-daily` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
 | `brew-changelog` | Before `brew upgrade`: collects changelogs of outdated formulae into one HTML page, **major** version jumps highlighted. |
+| `hiveguard` | Dispatcher — mainly `hiveguard update` to self-update (git pull + re-install). |
 
 ---
 
@@ -81,6 +82,30 @@ Options:
 
 The installer symlinks `bin/*` into `~/bin`, backs up any pre-existing files, and
 writes reports/logs to `~/.hiveguard/`.
+
+### Updating
+
+The tools in `~/bin` are **symlinks** into your clone, so updating is just a pull:
+
+```bash
+hiveguard update       # git pull + re-run installer (scripts AND launchd agent)
+```
+
+Under the hood that's `git -C <repo> pull` followed by `install.sh`. Because the
+commands are symlinks, script changes take effect immediately; re-running the installer
+also refreshes the launchd agent and re-links any newly added tools. A changed report
+layout (like collapsible projects) shows up on the **next scan** — wait for the daily
+run, or trigger one now:
+
+```bash
+osv-daily              # regenerate ~/.hiveguard/osv-projects.html right away
+```
+
+If you'd rather not use the `hiveguard` command, the manual equivalent is:
+
+```bash
+cd /path/to/hiveguard && git pull && ./install.sh
+```
 
 ### Prerequisites
 

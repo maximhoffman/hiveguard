@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# hiveguard — dispatcher for the toolkit. Mainly: self-update.
+#
+#   hiveguard update        # git pull the repo + re-run installer (scripts & agent)
+#   hiveguard version       # show installed version (git describe)
+#   hiveguard where         # print the repo path
+#   hiveguard help          # this help
+#
+# The installed ~/bin/hiveguard is a symlink into the cloned repo, so `update`
+# just pulls that repo. Since the other tools are symlinks too, script changes
+# apply immediately; re-running the installer also refreshes the launchd agent.
+set -euo pipefail
+
+# ── resolve the repo root by following this script's symlink (BSD-safe) ─────
+src="$0"
+if [ -L "$src" ]; then
+  t="$(readlink "$src")"
+  case "$t" in
+    /*) src="$t" ;;
+    *)  src="$(cd "$(dirname "$src")" && pwd)/$t" ;;
+  esac
+fi
+REPO="$(cd "$(dirname "$src")/.." && pwd)"
+
+cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+  update)
+    echo "▸ Обновляю hiveguard ($REPO)"
+    if ! git -C "$REPO" pull --ff-only; then
+      echo "! git pull не смог fast-forward — разрулите вручную в $REPO" >&2; exit 1
+    fi
+    echo "▸ Перезапускаю установщик (символические ссылки + launchd-агент)"
+    "$REPO/install.sh" "$@"
+    echo "✓ Обновлено. Новый отчёт появится при следующем скане (или запусти: osv-daily)"
+    ;;
+  version|--version|-v)
+    git -C "$REPO" describe --tags --always --dirty 2>/dev/null || git -C "$REPO" rev-parse --short HEAD
+    ;;
+  where)
+    echo "$REPO"
+    ;;
+  help|-h|--help|"")
+    grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "неизвестная команда: $cmd (см. hiveguard help)" >&2; exit 2 ;;
+esac

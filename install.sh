@@ -46,7 +46,7 @@ fi
 # ── 2. symlink CLIs into ~/bin ──────────────────────────────────────────────
 say "Linking tools into $BIN"
 mkdir -p "$BIN" "$HOME/.hiveguard"
-for tool in safe-add deps-audit osv-daily brew-changelog; do
+for tool in hiveguard safe-add deps-audit osv-daily brew-changelog; do
   target="$BIN/$tool"
   if [ -e "$target" ] && [ ! -L "$target" ]; then
     mv "$target" "$target.pre-hiveguard.bak"; warn "backed up existing $tool → $tool.pre-hiveguard.bak"
