@@ -103,12 +103,18 @@ for pr in projects:
             f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span></td>'
             f'<td class="mono fix">{fix}</td>'
             f'<td class="ids">{idlinks}{more}</td></tr>')
+    pcls, plbl = sev_bucket(pr["maxsev"])
     rows_html.append(
-        f'<section class="proj"><h3>{short(pr["src"])} <span class="cnt">{len(pr["pkgs"])} пакет(ов)</span></h3>'
+        f'<details class="proj"><summary>'
+        f'<span class="chev">▶</span>'
+        f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
+        f'<span class="pname">{short(pr["src"])}</span>'
+        f'<span class="cnt">{len(pr["pkgs"])} пакет(ов)</span></summary>'
         f'<div class="tblwrap"><table><thead><tr><th>Пакет</th><th>Версия</th><th>Макс. severity</th><th>Фикс в</th><th>ID</th></tr></thead>'
-        f'<tbody>{"".join(items)}</tbody></table></div></section>')
+        f'<tbody>{"".join(items)}</tbody></table></div></details>')
 
 body = "".join(rows_html) or '<p class="clean">✅ Известных уязвимостей не найдено.</p>'
+toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Развернуть всё</button></div>' if projects else ''
 
 page = f'''<title>OSV — проекты</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -133,10 +139,18 @@ h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
 .stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 14px;min-width:96px}}
 .stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
 .stat.crit .n{{color:var(--crit)}}
-.proj{{margin-top:30px}}
-.proj h3{{font-family:var(--mono);font-size:15px;margin:0 0 10px;display:flex;align-items:baseline;gap:10px}}
-.cnt{{font-size:12px;color:var(--faint);font-weight:400}}
-.tblwrap{{overflow-x:auto;border:1px solid var(--border);border-radius:10px}}
+details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
+details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
+details.proj>summary::-webkit-details-marker{{display:none}}
+details.proj>summary:hover{{background:var(--surface-2)}}
+.chev{{color:var(--faint);transition:transform .15s;font-size:11px}}
+details.proj[open]>summary .chev{{transform:rotate(90deg)}}
+.pname{{flex:1;font-weight:600;word-break:break-word}}
+.cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
+.tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
+.toolbar{{display:flex;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
+.btn{{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}}
+.btn:hover{{border-color:var(--accent)}}
 table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:600px}}
 th,td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}}
 th{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface-2)}}
@@ -163,9 +177,22 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 <div class="stat crit"><div class="n">{ig("CRIT","0")}</div><div class="l">критических</div></div>
 </div>
 </header>
+{toolbar}
 {body}
 <footer>osv-daily · один скан → отчёт + уведомление. bumblebee-каталог обновляется тем же запуском. Патчи ставь сам: обнови зависимость до «Фикс в».</footer>
-</div>'''
+</div>
+<script>
+(function(){{
+  var b=document.getElementById('toggleAll');
+  if(!b)return;
+  b.addEventListener('click',function(){{
+    var ds=[].slice.call(document.querySelectorAll('details.proj'));
+    var open=ds.some(function(d){{return !d.open;}});
+    ds.forEach(function(d){{d.open=open;}});
+    b.textContent=open?'Свернуть всё':'Развернуть всё';
+  }});
+}})();
+</script>'''
 open(os.environ["OUT"],"w").write(page)
 PYEOF
 
