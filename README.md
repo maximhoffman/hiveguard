@@ -1,7 +1,7 @@
 # 🐝 hiveguard
 
 **Supply-chain safety for local dev on macOS** — two independent layers of protection
-around the packages you install, wrapped in four small commands.
+around the packages you install, behind one `hiveguard` command.
 
 - **Install-time gate** ([bumblebee](#prerequisites)) — before a package is allowed to
   run its install scripts, it's checked against a known-compromised catalog.
@@ -68,7 +68,7 @@ dependency tree). Blocks on malicious (`MAL-`), warns on CVEs.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/hiveguard.git
+git clone https://github.com/maximhoffman/hiveguard.git
 cd hiveguard
 ./install.sh            # links tools into ~/bin, schedules the daily scan at 10:00
 ```
