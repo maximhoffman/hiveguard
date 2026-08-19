@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# osv-ack — acknowledge (mute) projects or findings in the osv-daily report.
+# Muted items stop counting toward the report totals and the daily notification,
+# but stay visible in a collapsed "Acknowledged" section so nothing is lost.
+# Use it for old projects you don't run: yes, their pinned versions have known
+# issues, but you don't need a fresh alert about them every day.
+#
+#   hiveguard ack <project-path>            # mute a whole project (all its findings)
+#   hiveguard ack <project-path> <package>  # mute one package inside that project
+#   hiveguard ack --list                    # list current acknowledgements
+#   hiveguard ack --remove <path> [package] # un-mute a project, or one of its packages
+#   hiveguard ack --clear                   # drop every acknowledgement
+#
+# State lives in ~/.hiveguard/osv-acks.json. <project-path> is the source path
+# shown in the report (usually the lockfile/manifest path) — the report's copy
+# buttons hand you the exact command, so you rarely type it by hand.
+set -euo pipefail
+command -v jq >/dev/null || { echo "jq required (brew install jq)"; exit 1; }
+
+STORE="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
+mkdir -p "$(dirname "$STORE")"
+[ -f "$STORE" ] || printf '{"projects":[],"packages":{}}\n' > "$STORE"
+# repair an unreadable/empty store rather than failing every command
+jq -e . "$STORE" >/dev/null 2>&1 || printf '{"projects":[],"packages":{}}\n' > "$STORE"
+
+usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
+save()  { local tmp; tmp="$(mktemp)"; cat > "$tmp"; mv "$tmp" "$STORE"; }
+
+case "${1:-}" in
+  ""|-h|--help|help)
+    usage ;;
+
+  -l|--list|list)
+    if [ "$(jq -r '(.projects|length) + ([.packages[]?]|length)' "$STORE")" = "0" ]; then
+      echo "No acknowledgements. The report counts everything."
+      exit 0
+    fi
+    echo "Acknowledged whole projects:"
+    jq -r '.projects[]? | "  • " + .' "$STORE" | { grep . || echo "  (none)"; }
+    echo "Acknowledged packages (per project):"
+    jq -r '.packages | to_entries[]? | "  • \(.key)\n" + (.value | map("      - " + .) | join("\n"))' "$STORE" \
+      | { grep . || echo "  (none)"; }
+    ;;
+
+  --clear)
+    printf '{"projects":[],"packages":{}}\n' > "$STORE"
+    echo "✔ cleared all acknowledgements" ;;
+
+  --remove|--rm|-r)
+    shift
+    path="${1:-}"; pkg="${2:-}"
+    [ -n "$path" ] || { echo "usage: hiveguard ack --remove <path> [package]" >&2; exit 2; }
+    if [ -n "$pkg" ]; then
+      jq --arg p "$path" --arg k "$pkg" \
+        '.packages[$p] = ((.packages[$p] // []) - [$k])
+         | (if ((.packages[$p] // []) | length) == 0 then del(.packages[$p]) else . end)' \
+        "$STORE" | save
+      echo "✔ un-muted package: $pkg  (in $path)"
+    else
+      jq --arg p "$path" '.projects -= [$p] | del(.packages[$p])' "$STORE" | save
+      echo "✔ un-muted project: $path"
+    fi ;;
+
+  -*)
+    echo "unknown flag: $1 (see: hiveguard ack --help)" >&2; exit 2 ;;
+
+  *)
+    path="$1"; pkg="${2:-}"
+    if [ -n "$pkg" ]; then
+      jq --arg p "$path" --arg k "$pkg" \
+        '.packages[$p] = (((.packages[$p] // []) + [$k]) | unique)' "$STORE" | save
+      echo "✔ muted package: $pkg  (in $path)"
+      echo "  excluded from the report totals and the daily alert."
+      echo "  undo: hiveguard ack --remove \"$path\" $pkg"
+    else
+      jq --arg p "$path" '.projects = ((.projects + [$p]) | unique)' "$STORE" | save
+      echo "✔ muted project: $path"
+      echo "  all of its findings are excluded from the totals and the daily alert."
+      echo "  undo: hiveguard ack --remove \"$path\""
+    fi ;;
+esac

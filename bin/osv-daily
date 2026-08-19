@@ -5,12 +5,18 @@
 #
 #   osv-daily            # scan ~/Projects
 #   osv-daily <path>     # scan another folder
+#
+# Acknowledgements: projects/packages muted via `hiveguard ack` (stored in
+# ~/.hiveguard/osv-acks.json) are excluded from the totals and the notification,
+# and shown in a collapsed "Acknowledged" section instead.
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 TARGET="${1:-$HOME/Projects}"
 REPORT="$HOME/.hiveguard/osv-projects.html"
-JSON="$(mktemp)"; trap 'rm -f "$JSON"' EXIT
+ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
+JSON="$(mktemp)"; COUNTS="$(mktemp)"
+trap 'rm -f "$JSON" "$COUNTS"' EXIT
 LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
 STAMP="$(date '+%Y-%m-%d %H:%M')"
 
@@ -25,21 +31,26 @@ fi
 osv-scanner scan source --recursive --format json "$TARGET" > "$JSON" 2>/dev/null || true
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
-# counters for the notification — each a separate resilient query (tonumber? // 0)
-jqn() { jq -r "$1" "$JSON" 2>/dev/null || echo 0; }
-VULNS=$(jqn '[.results[]?.packages[]? | (.vulnerabilities // []) | length] | add // 0')
-PKGS=$(jqn '[.results[]?.packages[]? | select(((.vulnerabilities // [])|length)>0)] | length')
-PROJECTS=$(jqn '[.results[]? | select(([.packages[]?.vulnerabilities[]?]|length)>0) | .source.path] | unique | length')
-CRIT=$(jqn '[.results[]?.packages[]?.groups[]?.max_severity | (tonumber? // 0) | select(.>=9)] | length')
-VULNS=${VULNS:-0}; PKGS=${PKGS:-0}; PROJECTS=${PROJECTS:-0}; CRIT=${CRIT:-0}
-
-# compact HTML report
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" \
-  VULNS="$VULNS" PKGS="$PKGS" PROJECTS="$PROJECTS" CRIT="$CRIT" python3 <<'PYEOF'
-import json, os, html, re
+# compact HTML report. Python owns the counts because it also applies the
+# acknowledgement filter, then writes the active/acked tallies to $COUNTS.
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" ACKS="$ACKS" COUNTS="$COUNTS" python3 <<'PYEOF'
+import json, os, html, re, shlex
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
     return os.environ.get(k, dv)
+
+# --- acknowledgements ------------------------------------------------------
+ack_projects, ack_packages = set(), {}
+try:
+    with open(os.environ.get("ACKS", "")) as f:
+        a = json.load(f)
+    ack_projects = set(a.get("projects", []) or [])
+    ack_packages = {k: set(v) for k, v in (a.get("packages", {}) or {}).items()}
+except Exception:
+    pass
+
+def is_acked(src, name):
+    return src in ack_projects or name in ack_packages.get(src, set())
 
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
@@ -52,69 +63,122 @@ def sev_bucket(score):
     if s >= 4: return ("med",  "MED")
     return ("low", "LOW")
 
-projects = []
+# split every project's vulnerable packages into active vs acknowledged
+active, acked = [], []
 for r in d.get("results", []):
     src = r.get("source", {}).get("path", "")
-    pkgs = []
+    act_pkgs, ack_pkgs = [], []
     for p in r.get("packages", []):
         vulns = p.get("vulnerabilities") or []
         if not vulns: continue
         info = p.get("package", {})
-        maxsev = max((float(g.get("max_severity","0") or 0) for g in (p.get("groups") or [])), default=0.0)
+        maxsev = max((float(g.get("max_severity", "0") or 0) for g in (p.get("groups") or [])), default=0.0)
         fixes = []
         for v in vulns:
             for a in v.get("affected", []) or []:
                 for rng in a.get("ranges", []) or []:
                     for e in rng.get("events", []) or []:
                         if e.get("fixed"): fixes.append(e["fixed"])
-        fix = max(fixes, key=vtuple) if fixes else ""
-        ids = []
-        for v in vulns:
-            ids.append(v.get("id",""))
-        pkgs.append({
-            "name": info.get("name",""), "version": info.get("version",""),
-            "eco": info.get("ecosystem",""), "sev": maxsev, "fix": fix,
-            "count": len(vulns), "ids": ids,
-            "summary": (vulns[0].get("summary") or "")[:160],
-        })
-    if pkgs:
-        pkgs.sort(key=lambda x: x["sev"], reverse=True)
-        projects.append({"src": src, "pkgs": pkgs,
-                         "maxsev": max(p["sev"] for p in pkgs)})
-projects.sort(key=lambda x: x["maxsev"], reverse=True)
+        pkg = {
+            "name": info.get("name", ""), "version": info.get("version", ""),
+            "eco": info.get("ecosystem", ""), "sev": maxsev,
+            "fix": max(fixes, key=vtuple) if fixes else "",
+            "count": len(vulns), "ids": [v.get("id", "") for v in vulns],
+        }
+        (ack_pkgs if is_acked(src, pkg["name"]) else act_pkgs).append(pkg)
+    if act_pkgs:
+        act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        active.append({"src": src, "pkgs": act_pkgs, "maxsev": max(p["sev"] for p in act_pkgs)})
+    if ack_pkgs:
+        ack_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        acked.append({"src": src, "pkgs": ack_pkgs, "maxsev": max(p["sev"] for p in ack_pkgs),
+                      "whole": src in ack_projects})
+active.sort(key=lambda x: x["maxsev"], reverse=True)
+acked.sort(key=lambda x: x["maxsev"], reverse=True)
+
+def tally(projlist):
+    vulns = sum(p["count"] for pr in projlist for p in pr["pkgs"])
+    pkgs  = sum(len(pr["pkgs"]) for pr in projlist)
+    crit  = sum(1 for pr in projlist for p in pr["pkgs"] if p["sev"] >= 9)
+    return len(projlist), pkgs, vulns, crit
+a_proj, a_pkg, a_vuln, a_crit = tally(active)
+k_proj, k_pkg, k_vuln, k_crit = tally(acked)
+
+# hand the active/acked counts back to the shell (notification + log)
+cf = os.environ.get("COUNTS", "")
+if cf:
+    with open(cf, "w") as f:
+        f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
+        f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
 
 def short(src):
-    s = src.replace(os.path.expanduser("~/Projects/"), "")
-    return html.escape(s)
+    return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
 
-rows_html = []
-for pr in projects:
-    items = []
-    for p in pr["pkgs"]:
-        cls, lbl = sev_bucket(p["sev"])
-        idlinks = " ".join(
-            f'<a href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
-            for i in p["ids"][:4])
-        more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"])>4 else ""
-        fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
-        items.append(
-            f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
+def cp_btn(cmd, label):
+    return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
+            f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
+
+def pkg_row(p, src, muted):
+    cls, lbl = sev_bucket(p["sev"])
+    idlinks = " ".join(
+        f'<a href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
+        for i in p["ids"][:4])
+    more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"]) > 4 else ""
+    fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
+    if muted:
+        btn = cp_btn("hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute")
+    else:
+        btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute")
+    return (f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
             f'<td class="mono">{html.escape(p["version"])}</td>'
             f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span></td>'
             f'<td class="mono fix">{fix}</td>'
-            f'<td class="ids">{idlinks}{more}</td></tr>')
-    pcls, plbl = sev_bucket(pr["maxsev"])
-    rows_html.append(
-        f'<details class="proj"><summary>'
-        f'<span class="chev">▶</span>'
-        f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
-        f'<span class="pname">{short(pr["src"])}</span>'
-        f'<span class="cnt">{len(pr["pkgs"])} packages</span></summary>'
-        f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th><th>Max severity</th><th>Fixed in</th><th>IDs</th></tr></thead>'
-        f'<tbody>{"".join(items)}</tbody></table></div></details>')
+            f'<td class="ids">{idlinks}{more}</td>'
+            f'<td class="act">{btn}</td></tr>')
 
-body = "".join(rows_html) or '<p class="clean">✅ No known vulnerabilities found.</p>'
-toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Expand all</button></div>' if projects else ''
+def proj_card(pr, muted):
+    rows = "".join(pkg_row(p, pr["src"], muted) for p in pr["pkgs"])
+    pcls, plbl = sev_bucket(pr["maxsev"])
+    if muted:
+        head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
+        whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
+        last = "Unmute"
+    else:
+        head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
+        whole = ''
+        last = "Mute"
+    return (f'<details class="proj{" acked" if muted else ""}"><summary>'
+            f'<span class="chev">▶</span>'
+            f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
+            f'<span class="pname">{short(pr["src"])}</span>{whole}'
+            f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
+            f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
+            f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div></details>')
+
+if active:
+    body = "".join(proj_card(pr, False) for pr in active)
+elif acked:
+    body = '<p class="clean">✅ No active vulnerabilities — everything found is acknowledged.</p>'
+else:
+    body = '<p class="clean">✅ No known vulnerabilities found.</p>'
+
+toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Expand all</button></div>' if active else ''
+
+acked_html = ""
+if acked:
+    acked_html = (
+        '<details class="ackwrap"><summary>'
+        f'Acknowledged — {k_proj} project(s), {k_pkg} package(s), {k_vuln} vuln(s) muted'
+        '</summary>'
+        '<p class="ackhint">Excluded from the totals above and from the daily alert. '
+        'Copy an “unmute” command to bring one back into the count.</p>'
+        + "".join(proj_card(pr, True) for pr in acked) +
+        '</details>')
+
+vuln_l = "vulnerabilities" + (f' · +{k_vuln} muted' if k_vuln else '')
+lede_extra = (' Muted projects/findings are excluded — see <b>Acknowledged</b> at the bottom.'
+              if acked else '')
 
 page = f'''<meta charset="utf-8">
 <title>OSV — projects</title>
@@ -141,6 +205,7 @@ h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
 .stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
 .stat.crit .n{{color:var(--crit)}}
 details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
+details.proj.acked{{opacity:.72}}
 details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
 details.proj>summary::-webkit-details-marker{{display:none}}
 details.proj>summary:hover{{background:var(--surface-2)}}
@@ -148,13 +213,20 @@ details.proj>summary:hover{{background:var(--surface-2)}}
 details.proj[open]>summary .chev{{transform:rotate(90deg)}}
 .pname{{flex:1;font-weight:600;word-break:break-word}}
 .cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
+.whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
 .tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
 .toolbar{{display:flex;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
 .btn{{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}}
 .btn:hover{{border-color:var(--accent)}}
-table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:600px}}
+.cp{{font-family:var(--mono);font-size:11px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;flex:none;
+background:var(--surface-2);border:1px solid var(--border-strong);color:var(--muted);padding:3px 8px;border-radius:6px;
+white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
+.cp:hover{{border-color:var(--accent);color:var(--accent)}}
+.cp.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
+table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}}
 th,td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}}
 th{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface-2)}}
+th.acth,td.act{{text-align:right;white-space:nowrap}}
 tr:last-child td{{border-bottom:none}}
 .pk{{font-family:var(--mono);font-weight:600}}.eco{{color:var(--faint);font-weight:400;margin-left:7px;font-size:11px}}
 .mono{{font-family:var(--mono);font-variant-numeric:tabular-nums}}
@@ -164,45 +236,77 @@ tr:last-child td{{border-bottom:none}}
 .sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
 .ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.more{{color:var(--faint)}}
 .clean{{color:var(--low);font-size:16px;margin-top:30px}}
+.ackwrap{{margin-top:30px}}
+.ackwrap>summary{{cursor:pointer;list-style:none;font-family:var(--mono);font-size:13px;color:var(--muted);border-top:1px dashed var(--border-strong);padding-top:16px}}
+.ackwrap>summary::-webkit-details-marker{{display:none}}
+.ackwrap>summary:hover{{color:var(--accent)}}
+.ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
 footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
 </style>
 <div class="wrap">
 <header>
 <p class="eyebrow">osv-daily · {html.escape(ig("STAMP"))}</p>
 <h1>Vulnerabilities in projects</h1>
-<p class="lede">Scan of <code>{html.escape(ig("TARGET"))}</code> against the OSV database. Sorted by severity. Click an ID for its osv.dev page.</p>
+<p class="lede">Scan of <code>{html.escape(ig("TARGET"))}</code> against the OSV database. Sorted by severity. Click an ID for its osv.dev page.{lede_extra}</p>
 <div class="stats">
-<div class="stat"><div class="n">{ig("PROJECTS","0")}</div><div class="l">projects affected</div></div>
-<div class="stat"><div class="n">{ig("PKGS","0")}</div><div class="l">packages</div></div>
-<div class="stat"><div class="n">{ig("VULNS","0")}</div><div class="l">vulnerabilities</div></div>
-<div class="stat crit"><div class="n">{ig("CRIT","0")}</div><div class="l">critical</div></div>
+<div class="stat"><div class="n">{a_proj}</div><div class="l">projects affected</div></div>
+<div class="stat"><div class="n">{a_pkg}</div><div class="l">packages</div></div>
+<div class="stat"><div class="n">{a_vuln}</div><div class="l">{vuln_l}</div></div>
+<div class="stat crit"><div class="n">{a_crit}</div><div class="l">critical</div></div>
 </div>
 </header>
 {toolbar}
 {body}
-<footer>osv-daily · one scan -> report + notification. The bumblebee catalog is refreshed by the same run. Apply fixes yourself: bump the dependency to "Fixed in".</footer>
+{acked_html}
+<footer>osv-daily · one scan -> report + notification. Mute an old project with the “mute” button (→ hiveguard ack). Apply fixes yourself: bump the dependency to "Fixed in".</footer>
 </div>
 <script>
 (function(){{
   var b=document.getElementById('toggleAll');
-  if(!b)return;
-  b.addEventListener('click',function(){{
-    var ds=[].slice.call(document.querySelectorAll('details.proj'));
-    var open=ds.some(function(d){{return !d.open;}});
-    ds.forEach(function(d){{d.open=open;}});
-    b.textContent=open?'Collapse all':'Expand all';
+  if(b){{
+    b.addEventListener('click',function(){{
+      var ds=[].slice.call(document.querySelectorAll('details.proj:not(.acked)'));
+      var open=ds.some(function(d){{return !d.open;}});
+      ds.forEach(function(d){{d.open=open;}});
+      b.textContent=open?'Collapse all':'Expand all';
+    }});
+  }}
+  document.addEventListener('click',function(e){{
+    var btn=e.target.closest('.cp');
+    if(!btn) return;
+    e.preventDefault(); e.stopPropagation();   // don't toggle the <details>
+    var cmd=btn.getAttribute('data-cmd');
+    function done(){{
+      var orig=btn.innerHTML;
+      btn.classList.add('ok'); btn.textContent='✓ copied';
+      setTimeout(function(){{btn.classList.remove('ok'); btn.innerHTML=orig;}},1500);
+    }}
+    function fb(){{
+      var t=document.createElement('textarea'); t.value=cmd;
+      t.style.position='fixed'; t.style.top='0'; t.style.opacity='0';
+      document.body.appendChild(t); t.focus(); t.select();
+      try{{document.execCommand('copy');}}catch(err){{}}
+      document.body.removeChild(t); done();
+    }}
+    if(navigator.clipboard&&navigator.clipboard.writeText){{ navigator.clipboard.writeText(cmd).then(done,fb); }}
+    else {{ fb(); }}
   }});
 }})();
 </script>'''
-open(os.environ["OUT"],"w").write(page)
+open(os.environ["OUT"], "w").write(page)
 PYEOF
 
-echo "[$STAMP] projects=$PROJECTS pkgs=$PKGS vulns=$VULNS crit=$CRIT → $REPORT" >> "$LOGDIR/osv-daily.log"
+# active/acked counts computed by python (notification + log use the ACTIVE ones)
+ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
+ACKED_PROJECTS=0; ACKED_PKGS=0; ACKED_VULNS=0; ACKED_CRIT=0
+[ -f "$COUNTS" ] && . "$COUNTS"
 
-# notification on findings
-if [ "${VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
+echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS) → $REPORT" >> "$LOGDIR/osv-daily.log"
+
+# notification only on ACTIVE (non-acknowledged) findings
+if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
   terminal-notifier -title "osv-daily: vulnerabilities found" \
-    -message "$PROJECTS project(s), $PKGS package(s), $VULNS total ($CRIT critical)" \
+    -message "$ACTIVE_PROJECTS project(s), $ACTIVE_PKGS package(s), $ACTIVE_VULNS total ($ACTIVE_CRIT critical)" \
     -open "file://$REPORT" -sender com.apple.Terminal 2>/dev/null || true
 fi
-echo "✅ done: $VULNS vulnerabilities across $PROJECTS projects → $REPORT"
+echo "✅ done: $ACTIVE_VULNS active vulnerabilities across $ACTIVE_PROJECTS projects ($ACKED_VULNS acknowledged) → $REPORT"

@@ -6,6 +6,7 @@
 #   hiveguard scan  [path|--global]      # scan installed deps for known vulns
 #   hiveguard daily [path]               # full scan → HTML report + notification
 #   hiveguard brew  [args]               # changelogs of outdated formulae, pre-upgrade
+#   hiveguard ack   <path> [pkg]         # mute a project/finding in the daily report
 #
 # Management:
 #   hiveguard update       # git pull the repo + re-run installer (scripts & agent)
@@ -38,6 +39,7 @@ case "$cmd" in
   scan)  exec "$BIN/deps-audit" "$@" ;;
   daily) exec "$BIN/osv-daily" "$@" ;;
   brew)  exec "$BIN/brew-changelog" "$@" ;;
+  ack)   exec "$BIN/osv-ack" "$@" ;;
 
   update)
     echo "🐝 Updating hiveguard ($REPO)"

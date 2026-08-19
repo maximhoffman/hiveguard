@@ -43,6 +43,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `hiveguard scan [path]` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
 | `hiveguard daily [path]` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
+| `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert. Muted items move to a collapsed "Acknowledged" section — never dropped. |
 | `hiveguard update` | Self-update: `git pull` the clone + re-run the installer (scripts **and** launchd agent). |
 
 ---
@@ -219,6 +220,26 @@ The report groups findings by project, sorted by severity, with the fixed-in ver
 osv.dev links for every advisory (theme-aware — adapts to light/dark):
 
 ![osv-daily report — vulnerabilities grouped by project and sorted by severity, each with max severity, fixed-in version, and links to osv.dev](docs/screenshots/osv-daily.png)
+
+#### Muting old projects
+
+An old project you don't run still has vulnerable pinned versions — but you don't need a
+fresh alert about it every morning. **Mute** it: muted projects and findings stop counting
+toward the totals and the notification, and move to a collapsed **Acknowledged** section
+so nothing is ever lost.
+
+```bash
+hiveguard ack ~/Projects/old-app/package-lock.json          # mute a whole project
+hiveguard ack ~/Projects/app/requirements.txt django        # mute one package/finding
+hiveguard ack --list                                        # what's currently muted
+hiveguard ack --remove ~/Projects/old-app/package-lock.json # bring it back
+```
+
+Every row in the report carries a **mute** button that copies the exact command for that
+project or package — click, paste, run. Acknowledgements persist in
+`~/.hiveguard/osv-acks.json`, so the next scan and the daily agent both honour them. When
+everything found is acknowledged, the report shows zero and the daily notification stays
+quiet. The `<path>` is the source path (lockfile/manifest) shown on each project row.
 
 ### `hiveguard brew` — read before you upgrade
 
