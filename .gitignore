@@ -4,3 +4,6 @@
 .DS_Store
 # generated launchd plist (created by install.sh)
 launchd/*.plist
+# tooling scratch (never commit)
+.serena/
+.playwright-mcp/

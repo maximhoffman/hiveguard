@@ -116,7 +116,8 @@ for pr in projects:
 body = "".join(rows_html) or '<p class="clean">✅ No known vulnerabilities found.</p>'
 toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Expand all</button></div>' if projects else ''
 
-page = f'''<title>OSV — projects</title>
+page = f'''<meta charset="utf-8">
+<title>OSV — projects</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{{--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;

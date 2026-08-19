@@ -215,6 +215,11 @@ launchd runs it on wake. Run it now to test:
 launchctl kickstart -k gui/$(id -u)/com.hiveguard.osv-daily
 ```
 
+The report groups findings by project, sorted by severity, with the fixed-in version and
+osv.dev links for every advisory (theme-aware — adapts to light/dark):
+
+![osv-daily report — vulnerabilities grouped by project and sorted by severity, each with max severity, fixed-in version, and links to osv.dev](docs/screenshots/osv-daily.png)
+
 ### `hiveguard brew` — read before you upgrade
 
 ```bash
@@ -235,6 +240,11 @@ automatically — it's a read-first tool.
 network. A real version bump changes the cache key and refetches — you never see a stale
 changelog for a new upgrade. Tune with `BREW_CHANGELOG_TTL` (seconds) and
 `BREW_CHANGELOG_CACHE` (dir); bypass with `--refresh` / `--no-cache`.
+
+Major jumps are separated from minor/patch updates; each card carries the package
+description, its changelog for the version range, and a copy-ready `brew upgrade` command:
+
+![brew changelog report — outdated formulae with descriptions, version ranges, expandable release notes, and a copy-to-clipboard upgrade command; major jumps highlighted](docs/screenshots/brew-changelog.png)
 
 ---
 

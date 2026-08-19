@@ -194,7 +194,8 @@ def card(d):
 major_html = "".join(card(d) for d in majors) or '<p class="empty">No major jumps 🎉</p>'
 minor_html = "".join(card(d) for d in minors)
 
-page = f'''<title>Brew changelogs</title>
+page = f'''<meta charset="utf-8">
+<title>Brew changelogs</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{{--bg:#f3efe8;--surface:#fbf9f5;--surface-2:#eae5db;--text:#211c15;--muted:#6b6154;--faint:#968b7b;
