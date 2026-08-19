@@ -43,15 +43,35 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   printf '   %s\n' "${MISSING[@]}"
 fi
 
-# ── 2. symlink CLIs into ~/bin ──────────────────────────────────────────────
-say "Linking tools into $BIN"
+# ── 2. symlink the CLI into ~/bin ───────────────────────────────────────────
+# hiveguard is the single entry point; add/scan/daily/brew are subcommands, so
+# only hiveguard (plus the short aliases hg/hvg) goes on PATH.
+say "Linking hiveguard into $BIN"
 mkdir -p "$BIN" "$HOME/.hiveguard"
-for tool in hiveguard safe-add deps-audit osv-daily brew-changelog; do
-  target="$BIN/$tool"
+
+target="$BIN/hiveguard"
+if [ -e "$target" ] && [ ! -L "$target" ]; then
+  mv "$target" "$target.pre-hiveguard.bak"; warn "backed up existing hiveguard → hiveguard.pre-hiveguard.bak"
+fi
+ln -sf "$REPO/bin/hiveguard" "$target"; ok "hiveguard → $REPO/bin/hiveguard"
+
+for a in hg hvg; do
+  target="$BIN/$a"
   if [ -e "$target" ] && [ ! -L "$target" ]; then
-    mv "$target" "$target.pre-hiveguard.bak"; warn "backed up existing $tool → $tool.pre-hiveguard.bak"
+    warn "$a already exists in $BIN and isn't ours — left as-is (use full 'hiveguard')"; continue
   fi
-  ln -sf "$REPO/bin/$tool" "$target"; ok "$tool → $REPO/bin/$tool"
+  ln -sf "$REPO/bin/hiveguard" "$target"; ok "$a → hiveguard (alias)"
+done
+
+# Clean up standalone command links from older installs — these are now
+# subcommands. Only remove OUR symlinks (into a hiveguard repo), never real files.
+for old in safe-add deps-audit osv-daily brew-changelog; do
+  target="$BIN/$old"
+  [ -L "$target" ] || continue
+  case "$(readlink "$target")" in
+    "$REPO/bin/$old"|*/hiveguard/bin/"$old")
+      rm -f "$target"; ok "removed obsolete standalone link: $old (now: hiveguard <action>)" ;;
+  esac
 done
 case ":$PATH:" in
   *":$BIN:"*) ok "$BIN is on PATH" ;;
@@ -87,4 +107,4 @@ else
   say "Skipping launchd agent (--no-agent)"
 fi
 
-echo; say "Done. Try:  safe-add npm left-pad --check-only"
+echo; say "Done. Try:  hiveguard add npm left-pad --check-only   (or: hg brew)"

@@ -34,22 +34,25 @@ Blind spot for **both**: a true zero-day not yet in any database.
 
 ## What's in the box
 
-| Tool | What it does |
+`hiveguard` is the single command. `hg` and `hvg` are short aliases (`hg brew` ==
+`hiveguard brew`). Everything is a subcommand — there are no separate per-tool commands.
+
+| Subcommand | What it does |
 |---|---|
-| `safe-add` | Install a package **only after** OSV clears it. Resolves the dependency tree *without installing*, scans it, then installs if clean. Layers on top of bumblebee. |
-| `deps-audit` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
-| `osv-daily` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
-| `brew-changelog` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
-| `hiveguard` | Single entry point — `add` / `scan` / `daily` / `brew` dispatch to the tools below, plus `update` to self-update. |
+| `hiveguard add <mgr> <pkg>` | Install a package **only after** OSV clears it. Resolves the dependency tree *without installing*, scans it, then installs if clean. Layers on top of bumblebee. |
+| `hiveguard scan [path]` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
+| `hiveguard daily [path]` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
+| `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
+| `hiveguard update` | Self-update: `git pull` the clone + re-run the installer (scripts **and** launchd agent). |
 
 ---
 
 ## Coverage by ecosystem
 
-`safe-add`/`deps-audit` cover what osv-scanner can read; bumblebee gates a subset at
+`hiveguard add`/`scan` cover what osv-scanner can read; bumblebee gates a subset at
 install time.
 
-| Ecosystem / manager | bumblebee (install-gate) | OSV (scan) | safe-add mode |
+| Ecosystem / manager | bumblebee (install-gate) | OSV (scan) | add mode |
 |---|:---:|:---:|---|
 | Node — npm / pnpm / yarn / bun | ✅ | ✅ | full tree |
 | Python — pip | ✅ | ✅ | full tree |
@@ -58,7 +61,7 @@ install time.
 | Go — go install | ✅ | ✅ | coarse² |
 | Ruby — gem | ❌ | ✅ | coarse² |
 | PHP — composer | ❌ | ✅ | coarse² |
-| Homebrew — brew | ❌ | ❌ | use `brew-changelog` |
+| Homebrew — brew | ❌ | ❌ | use `hiveguard brew` |
 
 ¹ via `cargo audit`.  ² coarse = checks the named package via the OSV API (no full
 dependency tree). Blocks on malicious (`MAL-`), warns on CVEs.
@@ -80,8 +83,11 @@ Options:
 ./install.sh --hour 9        # daily scan at 09:00 instead of 10:00
 ```
 
-The installer symlinks `bin/*` into `~/bin`, backs up any pre-existing files, and
-writes reports/logs to `~/.hiveguard/`.
+The installer symlinks `hiveguard` (plus the short aliases `hg` and `hvg`) into `~/bin`,
+backs up any pre-existing file of the same name, and writes reports/logs to
+`~/.hiveguard/`. If you installed an older version that placed separate `safe-add` /
+`deps-audit` / `osv-daily` / `brew-changelog` commands on your `PATH`, the installer
+removes those obsolete links — everything is a `hiveguard` subcommand now.
 
 **`~/bin` must be on your `PATH`.** If it isn't (the installer warns you), the commands
 only resolve by full path. Add this to your `~/.zshrc` and open a new terminal:
@@ -92,20 +98,20 @@ export PATH="$HOME/bin:$PATH"
 
 ### Updating
 
-The tools in `~/bin` are **symlinks** into your clone, so updating is just a pull:
+`hiveguard` in `~/bin` is a **symlink** into your clone, so updating is just a pull:
 
 ```bash
 hiveguard update       # git pull + re-run installer (scripts AND launchd agent)
 ```
 
 Under the hood that's `git -C <repo> pull` followed by `install.sh`. Because the
-commands are symlinks, script changes take effect immediately; re-running the installer
-also refreshes the launchd agent and re-links any newly added tools. A changed report
+command is a symlink, script changes take effect immediately; re-running the installer
+also refreshes the launchd agent and cleans up any obsolete links. A changed report
 layout (like collapsible projects) shows up on the **next scan** — wait for the daily
 run, or trigger one now:
 
 ```bash
-osv-daily              # regenerate ~/.hiveguard/osv-projects.html right away
+hiveguard daily        # regenerate ~/.hiveguard/osv-projects.html right away
 ```
 
 If you'd rather not use the `hiveguard` command, the manual equivalent is:
@@ -124,7 +130,7 @@ brew install jq osv-scanner
 
 Optional but recommended:
 
-- **gh** (`brew install gh`, then `gh auth login`) — `brew-changelog` uses it to pull
+- **gh** (`brew install gh`, then `gh auth login`) — `hiveguard brew` uses it to pull
   release notes from GitHub.
 - **bumblebee** — the install-time gate. It's a separate upstream tool: a Go binary
   plus a threat-intel catalog. Install the binary (`go install …`) and clone the
@@ -135,33 +141,33 @@ Optional but recommended:
   source "$HOME/bin/bumblebee-guard.sh"
   ```
 
-  Without it, `safe-add`/`deps-audit` still work (OSV layer only) — you just lose the
+  Without it, `hiveguard add`/`scan` still work (OSV layer only) — you just lose the
   install-moment gating on npm/pip/go/cargo.
 
 ---
 
 ## Usage
 
-Everything is reachable through the single `hiveguard` command, or by calling each
-tool directly — they're equivalent:
+Everything runs through the single `hiveguard` command (or `hg` / `hvg`):
 
 ```bash
-hiveguard add   npm react-router     # = safe-add npm react-router
-hiveguard scan  ~/Projects/app       # = deps-audit ~/Projects/app
-hiveguard daily                      # = osv-daily
-hiveguard brew                       # = brew-changelog
+hiveguard add   npm react-router     # gated install
+hiveguard scan  ~/Projects/app       # scan a project for known vulns
+hiveguard daily                      # full scan → HTML report
+hiveguard brew                       # changelogs before brew upgrade
+hg brew                              # same thing, short alias
 ```
 
-### `safe-add` — gated install
+### `hiveguard add` — gated install
 
 ```bash
-safe-add npm  react-router          # extra args pass through: safe-add npm react-router -g
-safe-add pip  requests
-safe-add uv   serena-agent          # uv tool install — covers the bumblebee gap
-safe-add gem  nokogiri              # coarse (name-only) check
+hiveguard add npm  react-router     # extra args pass through: hiveguard add npm react-router -g
+hiveguard add pip  requests
+hiveguard add uv   serena-agent     # uv tool install — covers the bumblebee gap
+hiveguard add gem  nokogiri         # coarse (name-only) check
 
-safe-add npm  lodash@4.17.4 --check-only   # scan only, don't install
-safe-add npm  something --force            # install despite critical/MAL (deliberate)
+hiveguard add npm  lodash@4.17.4 --check-only   # scan only, don't install
+hiveguard add npm  something --force            # install despite critical/MAL (deliberate)
 ```
 
 Policy:
@@ -174,31 +180,31 @@ Example — a package with high-but-not-critical issues installs with a warning;
 a critical CVE is blocked:
 
 ```
-$ safe-add npm react-router@7.13.0 --check-only
+$ hiveguard add npm react-router@7.13.0 --check-only
 vulnerable packages in tree: 1
   CVE   react-router@7.13.0   GHSA-2j2x-hqr9-3h42,GHSA-337j-9hxr-rhxg,…
 ⚠ vulnerabilities present (12; high: 6), none critical — proceeding
 
-$ safe-add npm lodash@4.17.4 --check-only
+$ hiveguard add npm lodash@4.17.4 --check-only
   CRIT  lodash@4.17.4         GHSA-jf85-cpcp-j695,…
 ✖ critical (CVSS≥9): 1
 Install cancelled. Override deliberately with --force
 ```
 
-### `deps-audit` — scan on demand
+### `hiveguard scan` — scan on demand
 
 ```bash
-deps-audit                 # scan the project in the current directory
-deps-audit ~/Projects/app  # scan a specific project
-deps-audit --global        # scan global installs (npm -g, uv tools)
-deps-audit --no-refresh    # skip refreshing the bumblebee catalog
+hiveguard scan                 # scan the project in the current directory
+hiveguard scan ~/Projects/app  # scan a specific project
+hiveguard scan --global        # scan global installs (npm -g, uv tools)
+hiveguard scan --no-refresh    # skip refreshing the bumblebee catalog
 ```
 
-### `osv-daily` — the scheduled scan
+### `hiveguard daily` — the scheduled scan
 
 ```bash
-osv-daily            # scan ~/Projects → HTML report + notification
-osv-daily ~/work     # scan another tree
+hiveguard daily            # scan ~/Projects → HTML report + notification
+hiveguard daily ~/work     # scan another tree
 ```
 
 Report: `~/.hiveguard/osv-projects.html`. Log: `~/.hiveguard/osv-daily.log`.
@@ -209,14 +215,14 @@ launchd runs it on wake. Run it now to test:
 launchctl kickstart -k gui/$(id -u)/com.hiveguard.osv-daily
 ```
 
-### `brew-changelog` — read before you upgrade
+### `hiveguard brew` — read before you upgrade
 
 ```bash
-brew-changelog                 # all outdated formulae → HTML page, majors on top
-brew-changelog --no-update     # skip `brew update` first (faster)
-brew-changelog --refresh       # ignore the cache, refetch changelogs from GitHub
-brew-changelog --no-cache      # don't read or write the cache
-ONLY=z3,ffmpeg brew-changelog  # only these
+hiveguard brew                 # all outdated formulae → HTML page, majors on top
+hiveguard brew --no-update     # skip `brew update` first (faster)
+hiveguard brew --refresh       # ignore the cache, refetch changelogs from GitHub
+hiveguard brew --no-cache      # don't read or write the cache
+ONLY=z3,ffmpeg hiveguard brew  # only these
 ```
 
 Each formula card shows a **one-line description** (what the package is), its changelog
@@ -232,7 +238,7 @@ changelog for a new upgrade. Tune with `BREW_CHANGELOG_TTL` (seconds) and
 
 ---
 
-## How `safe-add` resolves without installing
+## How `hiveguard add` resolves without installing
 
 Per ecosystem it computes the full dependency tree **without touching your system**,
 then scans the result:
@@ -256,8 +262,8 @@ on npm/pip/go/cargo you get **both** databases at once.
   catalog) passes.
 - Paths assume Apple Silicon Homebrew (`/opt/homebrew`). Adjust `PATH` in the scripts
   for Intel Macs (`/usr/local`).
-- The `real install` step of `safe-add` runs in the current directory — run it from the
-  root of the target project, like a normal `npm install`.
+- The `real install` step of `hiveguard add` runs in the current directory — run it from
+  the root of the target project, like a normal `npm install`.
 
 ---
 
