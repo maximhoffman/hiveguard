@@ -39,7 +39,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `safe-add` | Install a package **only after** OSV clears it. Resolves the dependency tree *without installing*, scans it, then installs if clean. Layers on top of bumblebee. |
 | `deps-audit` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
 | `osv-daily` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
-| `brew-changelog` | Before `brew upgrade`: collects changelogs of outdated formulae into one HTML page, **major** version jumps highlighted. |
+| `brew-changelog` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
 | `hiveguard` | Single entry point — `add` / `scan` / `daily` / `brew` dispatch to the tools below, plus `update` to self-update. |
 
 ---
@@ -214,10 +214,21 @@ launchctl kickstart -k gui/$(id -u)/com.hiveguard.osv-daily
 ```bash
 brew-changelog                 # all outdated formulae → HTML page, majors on top
 brew-changelog --no-update     # skip `brew update` first (faster)
+brew-changelog --refresh       # ignore the cache, refetch changelogs from GitHub
+brew-changelog --no-cache      # don't read or write the cache
 ONLY=z3,ffmpeg brew-changelog  # only these
 ```
 
-Nothing is upgraded — it's a read-first tool. Review majors, then run `brew upgrade`.
+Each formula card shows a **one-line description** (what the package is), its changelog
+across the version range, and a **copy button** with the exact `brew upgrade <formula>`
+command — click it, paste into your terminal, upgrade just that one. Nothing is upgraded
+automatically — it's a read-first tool.
+
+**Changelog cache.** Release notes are cached per formula + target version under
+`~/.hiveguard/cache/brew-releases/`, so re-running within the TTL (default 6h) skips the
+network. A real version bump changes the cache key and refetches — you never see a stale
+changelog for a new upgrade. Tune with `BREW_CHANGELOG_TTL` (seconds) and
+`BREW_CHANGELOG_CACHE` (dir); bypass with `--refresh` / `--no-cache`.
 
 ---
 

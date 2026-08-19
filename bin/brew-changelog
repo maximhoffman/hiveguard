@@ -6,21 +6,37 @@
 #   brew-changelog                 # all outdated formulae -> page + open
 #   brew-changelog --no-update     # skip `brew update` (faster)
 #   brew-changelog -o /path.html   # custom output path
+#   brew-changelog --refresh       # ignore cache, refetch changelogs from GitHub
+#   brew-changelog --no-cache      # don't read or write the changelog cache
 #   ONLY=ada-url,ast-grep brew-changelog   # only these (for testing)
+#
+# Changelog cache: GitHub releases are cached per repo+target-version under
+#   ~/.hiveguard/cache/brew-releases so a re-run within the TTL skips the network.
+#   Env: BREW_CHANGELOG_TTL (seconds, default 21600 = 6h),
+#        BREW_CHANGELOG_CACHE (cache dir).
 #
 # Requires: brew, jq. Changelogs are pulled via gh (if authenticated); else links only.
 set -euo pipefail
 
 DO_UPDATE=1
+USE_CACHE=1
+REFRESH=0
 OUT="$HOME/.hiveguard/brew-changelog-$(date +%Y%m%d-%H%M).html"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-update) DO_UPDATE=0 ;;
+    --no-cache) USE_CACHE=0 ;;
+    --refresh) REFRESH=1 ;;
     -o) shift; OUT="$1" ;;
     -h|--help) grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac; shift
 done
+
+CACHE_DIR="${BREW_CHANGELOG_CACHE:-$HOME/.hiveguard/cache/brew-releases}"
+CACHE_TTL="${BREW_CHANGELOG_TTL:-21600}"   # 6h
+NOW=$(date +%s)
+[ "$USE_CACHE" -eq 1 ] && mkdir -p "$CACHE_DIR" 2>/dev/null || true
 
 command -v brew >/dev/null || { echo "brew not found"; exit 1; }
 command -v jq   >/dev/null || { echo "jq required (brew install jq)"; exit 1; }
@@ -54,12 +70,12 @@ repo_override() {
   esac
 }
 
-# batch info: name -> stable_url, homepage (one call for all)
-INFO=$(brew info --json=v2 $NAMES 2>/dev/null | jq -c '[.formulae[] | {name, url:.urls.stable.url, homepage}]')
+# batch info: name -> stable_url, homepage, desc (one call for all)
+INFO=$(brew info --json=v2 $NAMES 2>/dev/null | jq -c '[.formulae[] | {name, url:.urls.stable.url, homepage, desc}]')
 
 ACC="$(mktemp)"; TMPREL="$(mktemp)"; DATAJSON="$(mktemp)"
 trap 'rm -f "$ACC" "$TMPREL" "$DATAJSON"' EXIT
-i=0
+i=0; N_CACHE=0; N_FETCH=0
 while IFS= read -r name; do
   [ -z "$name" ] && continue
   old=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.installed_versions[0] // empty' <<<"$OUTDATED")
@@ -67,6 +83,7 @@ while IFS= read -r name; do
   [ -z "$new" ] && new=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.url' <<<"$INFO" >/dev/null 2>&1; echo "")
   url=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.url // empty'      <<<"$INFO")
   home=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.homepage // empty' <<<"$INFO")
+  desc=$(jq -r --arg n "$name" '.[]|select(.name==$n)|.desc // empty'     <<<"$INFO")
   oldmaj=${old%%.*}; newmaj=${new%%.*}
   major=false; [ -n "$old" ] && [ "$oldmaj" != "$newmaj" ] && major=true
 
@@ -77,22 +94,41 @@ while IFS= read -r name; do
   fi
 
   echo '[]' > "$TMPREL"
-  if [ "$HAVE_GH" -eq 1 ] && [ -n "$repo" ]; then
-    gh api "repos/$repo/releases?per_page=100" 2>/dev/null \
-      | jq -c '[.[] | {tag:.tag_name, name:.name, date:.published_at, url:.html_url, body:((.body // "")[0:1600])}]' \
-      > "$TMPREL" 2>/dev/null || echo '[]' > "$TMPREL"
-    [ -s "$TMPREL" ] || echo '[]' > "$TMPREL"
+  relsrc=""   # "", "cache", or "fetch"
+  if [ -n "$repo" ]; then
+    ckey=$(printf '%s@%s' "$repo" "$new" | tr -c 'A-Za-z0-9._@-' '_')
+    cfile="$CACHE_DIR/$ckey.json"
+    if [ "$USE_CACHE" -eq 1 ] && [ "$REFRESH" -eq 0 ] && [ -f "$cfile" ]; then
+      cage=$(( NOW - $(stat -f %m "$cfile" 2>/dev/null || echo 0) ))
+      if [ "$cage" -ge 0 ] && [ "$cage" -lt "$CACHE_TTL" ]; then
+        cp "$cfile" "$TMPREL" && relsrc="cache"
+      fi
+    fi
+    if [ -z "$relsrc" ] && [ "$HAVE_GH" -eq 1 ]; then
+      if raw=$(gh api "repos/$repo/releases?per_page=100" 2>/dev/null); then
+        if printf '%s' "$raw" | jq -c '[.[] | {tag:.tag_name, name:.name, date:.published_at, url:.html_url, body:((.body // "")[0:1600])}]' > "$TMPREL" 2>/dev/null && [ -s "$TMPREL" ]; then
+          relsrc="fetch"
+          [ "$USE_CACHE" -eq 1 ] && cp "$TMPREL" "$cfile" 2>/dev/null || true
+        else
+          echo '[]' > "$TMPREL"
+        fi
+      else
+        echo '[]' > "$TMPREL"
+      fi
+    fi
   fi
   compare=""
   [ -n "$repo" ] && [ -n "$old" ] && compare="https://github.com/$repo/compare/v$old...v$new"
 
   jq -c -n \
     --arg name "$name" --arg old "$old" --arg new "$new" --argjson major "$major" \
-    --arg repo "$repo" --arg home "$home" --arg compare "$compare" --slurpfile releases "$TMPREL" \
-    '{name:$name,old:$old,new:$new,major:$major,repo:$repo,home:$home,compare:$compare,releases:($releases[0] // [])}' \
+    --arg repo "$repo" --arg home "$home" --arg desc "$desc" --arg compare "$compare" --slurpfile releases "$TMPREL" \
+    '{name:$name,old:$old,new:$new,major:$major,repo:$repo,home:$home,desc:$desc,compare:$compare,releases:($releases[0] // [])}' \
     >> "$ACC"
-  i=$((i+1)); printf '  [%d/%d] %s%s\n' "$i" "$N" "$name" "$([ "$major" = true ] && echo '  ⬆ MAJOR')" >&2
+  case "$relsrc" in cache) N_CACHE=$((N_CACHE+1)); src=' (cached)' ;; fetch) N_FETCH=$((N_FETCH+1)); src='' ;; *) src='' ;; esac
+  i=$((i+1)); printf '  [%d/%d] %s%s%s\n' "$i" "$N" "$name" "$([ "$major" = true ] && echo '  ⬆ MAJOR')" "$src" >&2
 done <<<"$NAMES"
+[ "$USE_CACHE" -eq 1 ] && printf '📦 changelog cache: %d from cache, %d fetched (ttl %ds)\n' "$N_CACHE" "$N_FETCH" "$CACHE_TTL" >&2
 
 jq -s '.' "$ACC" > "$DATAJSON"
 DATAJSON="$DATAJSON" OUT="$OUT" python3 <<'PYEOF'
@@ -125,11 +161,17 @@ def card(d):
     head = (f'<div class="cardhead"><div class="nm">{html.escape(d["name"])}{chip}</div>'
             f'<div class="ver">{html.escape(d["old"])} <span class="arr">→</span> '
             f'<b>{html.escape(d["new"])}</b></div></div>')
+    desc = (d.get("desc") or "").strip()
+    desctxt = f'<div class="desc">{html.escape(desc)}</div>' if desc else ''
     links = []
     if d["repo"]:    links.append(f'<a href="https://github.com/{html.escape(d["repo"])}" target="_blank" rel="noopener">repo</a>')
     if d["compare"]: links.append(f'<a href="{html.escape(d["compare"])}" target="_blank" rel="noopener">diff {html.escape(d["old"])}…{html.escape(d["new"])}</a>')
     if d["home"]:    links.append(f'<a href="{html.escape(d["home"])}" target="_blank" rel="noopener">site</a>')
     linkrow = f'<div class="links">{" · ".join(links)}</div>' if links else ''
+    cmd = f'brew upgrade {d["name"]}'
+    copyrow = (f'<div class="actions"><button class="cp" type="button" '
+               f'data-cmd="{html.escape(cmd)}" title="Copy the upgrade command for this formula">'
+               f'<span class="cpi">⧉</span><code>{html.escape(cmd)}</code></button></div>')
     if rels:
         items = []
         for r in rels[:8]:
@@ -147,7 +189,7 @@ def card(d):
         changelog = '<div class="note-line">No releases found in range — see the <b>diff</b> above (this repo marks changes with tags, not GitHub Releases).</div>'
     else:
         changelog = '<div class="note-line">Not on GitHub — check the project site for its changelog.</div>'
-    return f'<div class="card {"maj" if d["major"] else ""}">{head}{linkrow}{changelog}</div>'
+    return f'<div class="card {"maj" if d["major"] else ""}">{head}{desctxt}{linkrow}{copyrow}{changelog}</div>'
 
 major_html = "".join(card(d) for d in majors) or '<p class="empty">No major jumps 🎉</p>'
 minor_html = "".join(card(d) for d in minors)
@@ -180,7 +222,17 @@ h2{{font-size:20px;margin:38px 0 4px}}.sub{{color:var(--muted);font-size:14px;ma
 .nm{{font-family:var(--mono);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}}
 .major{{font-family:var(--mono);font-size:10px;letter-spacing:.08em;background:var(--major-soft);color:var(--major);padding:2px 6px;border-radius:5px}}
 .ver{{font-family:var(--mono);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}}.ver b{{color:var(--text)}}.arr{{color:var(--faint)}}
+.desc{{margin-top:6px;font-size:13px;color:var(--muted);max-width:70ch}}
 .links{{margin-top:6px;font-family:var(--mono);font-size:12px}}.links a{{color:var(--accent);text-decoration:none}}.links a:hover{{text-decoration:underline}}
+.actions{{margin-top:11px}}
+.cp{{font-family:var(--mono);font-size:12px;display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text);padding:5px 10px;border-radius:7px;
+transition:background .15s,border-color .15s,color .15s}}
+.cp:hover{{border-color:var(--accent)}}
+.cp code{{font-family:var(--mono);background:none;color:var(--accent);padding:0}}
+.cp .cpi{{color:var(--faint)}}
+.cp.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
+.cp.ok code,.cp.ok .cpi{{color:#fff}}
 .rels{{margin-top:12px;display:flex;flex-direction:column;gap:5px}}
 .rel{{border:1px solid var(--border);border-radius:8px;background:var(--bg);overflow:hidden}}
 .rel summary{{cursor:pointer;padding:8px 11px;display:flex;gap:10px;align-items:baseline;font-size:13px;list-style:none}}
@@ -197,7 +249,7 @@ footer{{margin-top:40px;padding-top:18px;border-top:1px solid var(--border);colo
 <header>
 <p class="eyebrow">Homebrew · before upgrading</p>
 <h1>Brew changelogs</h1>
-<p class="lede">What actually changes in outdated formulae. Major version jumps are likely breaking changes — read those first, then run <code>brew upgrade</code>.</p>
+<p class="lede">What actually changes in outdated formulae. Major version jumps are likely breaking changes — read those first. Click a formula's command to copy it, then paste into your terminal to upgrade just that one.</p>
 <div class="stats">
 <div class="stat"><div class="n">{len(data)}</div><div class="l">formulae outdated</div></div>
 <div class="stat m"><div class="n">{len(majors)}</div><div class="l">major jumps</div></div>
@@ -209,8 +261,30 @@ footer{{margin-top:40px;padding-top:18px;border-top:1px solid var(--border);colo
 <h2>Minor & patches</h2>
 <p class="sub">Usually safe, but worth a glance.</p>
 {minor_html}
-<footer>Generated by brew-changelog · {len(data)} formulae · source: GitHub Releases via gh. Nothing was upgraded — run <code>brew upgrade</code> yourself.</footer>
-</div>'''
+<footer>Generated by brew-changelog · {len(data)} formulae · source: GitHub Releases via gh. Nothing was upgraded — copy a command above and run it yourself.</footer>
+</div>
+<script>
+document.addEventListener('click',function(e){{
+  var b=e.target.closest('.cp'); if(!b) return;
+  var cmd=b.getAttribute('data-cmd');
+  function done(){{
+    var orig=b.innerHTML;
+    b.classList.add('ok');
+    b.innerHTML='<span class="cpi">✓</span><code>copied</code>';
+    setTimeout(function(){{b.classList.remove('ok'); b.innerHTML=orig;}},1500);
+  }}
+  function fallback(){{
+    var t=document.createElement('textarea'); t.value=cmd;
+    t.style.position='fixed'; t.style.top='0'; t.style.opacity='0';
+    document.body.appendChild(t); t.focus(); t.select();
+    try{{document.execCommand('copy');}}catch(err){{}}
+    document.body.removeChild(t); done();
+  }}
+  if(navigator.clipboard&&navigator.clipboard.writeText){{
+    navigator.clipboard.writeText(cmd).then(done,fallback);
+  }} else {{ fallback(); }}
+}});
+</script>'''
 
 with open(out, "w") as f:
     f.write(page)
