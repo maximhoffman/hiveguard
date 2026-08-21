@@ -41,10 +41,12 @@ Blind spot for **both**: a true zero-day not yet in any database.
 |---|---|
 | `hiveguard add <mgr> <pkg>` | Install a package **only after** OSV clears it. Resolves the dependency tree *without installing*, scans it, then installs if clean. Layers on top of bumblebee. |
 | `hiveguard scan [path]` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
-| `hiveguard daily [path]` | The scheduled scan: one pass over `~/Projects` → compact HTML report + macOS notification on findings. Driven by a launchd agent at 10:00. |
+| `hiveguard daily [folder…]` | The scan behind the daily report: one pass over your home folder (or the folders you name) → compact HTML report + macOS notification on findings. Compares against the previous scan to flag what's **new**. |
+| `hiveguard schedule on\|off\|status` | Schedule the daily scan — you pick the time and folders. Catches up on the next wake/startup if the Mac was asleep. Not automatic; you turn it on. |
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
-| `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert. Muted items move to a collapsed "Acknowledged" section — never dropped. |
-| `hiveguard update` | Self-update: `git pull` the clone + re-run the installer (scripts **and** launchd agent). |
+| `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you re-ack. Muted items move to a collapsed "Acknowledged" section — never dropped. |
+| `hiveguard doctor [--fix]` | Diagnose install/migration health (install method, PATH shadowing, obsolete `~/bin` links, the launchd agent, the shell guard, prerequisites). `--fix` applies only safe, reversible repairs. |
+| `hiveguard update` | Self-update: `brew upgrade` under a brew install, or `git pull` + re-run the installer from a source checkout. |
 
 ---
 
@@ -71,24 +73,57 @@ dependency tree). Blocks on malicious (`MAL-`), warns on CVEs.
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew install maximhoffman/hiveguard/hiveguard
+```
+
+or, equivalently, tap first:
+
+```bash
+brew tap maximhoffman/hiveguard
+brew install hiveguard
+```
+
+Homebrew pulls in the required tools (`jq`, `osv-scanner`, `python`) automatically as
+dependencies, so there's nothing else to install for the core scanning to work. The
+optional extras under [Prerequisites](#prerequisites) still add features (desktop
+alerts, `hiveguard brew` changelogs, the install-time gate).
+
+> **Honest note:** this needs the first tagged release to be published and the tap
+> `maximhoffman/homebrew-hiveguard` to exist. Until then, use the from-source install
+> below.
+
+The daily scan is **not** scheduled automatically. Turn it on when you want it:
+
+```bash
+hiveguard schedule on            # scan your home folder daily at 10:00
+```
+
+See [Scheduling the daily scan](#scheduling-the-daily-scan) for time and folder options.
+
+### From source / development
+
 ```bash
 git clone https://github.com/maximhoffman/hiveguard.git
 cd hiveguard
-./install.sh            # links tools into ~/bin, schedules the daily scan at 10:00
+./install.sh            # links tools into ~/bin
 ```
 
-Options:
+The installer symlinks `hiveguard` (plus the short alias `hvg`) into `~/bin`, backs up
+any pre-existing file of the same name, writes reports/logs to `~/.hiveguard/`, and
+removes obsolete links from older installs (the standalone `safe-add` / `deps-audit` /
+`osv-daily` / `brew-changelog` commands and the retired `hg` alias — everything is a
+`hiveguard` subcommand now). It also schedules the daily scan at 10:00 unless you opt
+out:
 
 ```bash
-./install.sh --no-agent      # don't install the launchd daily scan
-./install.sh --hour 9        # daily scan at 09:00 instead of 10:00
+./install.sh --no-agent      # don't schedule the daily scan
+./install.sh --hour 9        # schedule the daily scan at 09:00 instead of 10:00
 ```
 
-The installer symlinks `hiveguard` (plus the short alias `hvg`) into `~/bin`,
-backs up any pre-existing file of the same name, and writes reports/logs to
-`~/.hiveguard/`. If you installed an older version that placed separate `safe-add` /
-`deps-audit` / `osv-daily` / `brew-changelog` commands on your `PATH`, the installer
-removes those obsolete links — everything is a `hiveguard` subcommand now.
+You can always change or remove the schedule afterwards with `hiveguard schedule`.
 
 **`~/bin` must be on your `PATH`.** If it isn't (the installer warns you), the commands
 only resolve by full path. Add this to your `~/.zshrc` and open a new terminal:
@@ -97,42 +132,45 @@ only resolve by full path. Add this to your `~/.zshrc` and open a new terminal:
 export PATH="$HOME/bin:$PATH"
 ```
 
-### Updating
-
-`hiveguard` in `~/bin` is a **symlink** into your clone, so updating is just a pull:
-
-```bash
-hiveguard update       # git pull + re-run installer (scripts AND launchd agent)
-```
-
-Under the hood that's `git -C <repo> pull` followed by `install.sh`. Because the
-command is a symlink, script changes take effect immediately; re-running the installer
-also refreshes the launchd agent and cleans up any obsolete links. A changed report
-layout (like collapsible projects) shows up on the **next scan** — wait for the daily
-run, or trigger one now:
-
-```bash
-hiveguard daily        # regenerate ~/.hiveguard/osv-projects.html right away
-```
-
-If you'd rather not use the `hiveguard` command, the manual equivalent is:
-
-```bash
-cd /path/to/hiveguard && git pull && ./install.sh
-```
-
-### Prerequisites
-
-Required:
+A source install pulls the required tools yourself:
 
 ```bash
 brew install jq osv-scanner
 ```
 
-Optional but recommended:
+### Updating
+
+```bash
+hiveguard update
+```
+
+`hiveguard update` does the right thing for how you installed it:
+
+- **Homebrew install** → runs `brew upgrade hiveguard`.
+- **Source install** → `git pull --ff-only` the clone, then re-runs `install.sh`
+  (refreshing the symlinks and the launchd agent).
+
+You can also run the native update directly — `brew upgrade hiveguard` under brew, or
+`cd /path/to/hiveguard && git pull && ./install.sh` from a clone.
+
+A changed report layout shows up on the **next scan** — wait for the daily run, or
+trigger one now:
+
+```bash
+hiveguard daily        # regenerate ~/.hiveguard/osv-projects.html right away
+```
+
+### Prerequisites
+
+Under Homebrew the required tools (`jq`, `osv-scanner`, `python`) arrive automatically.
+For a source install, grab them yourself: `brew install jq osv-scanner`.
+
+Everything below is **optional but recommended**:
 
 - **gh** (`brew install gh`, then `gh auth login`) — `hiveguard brew` uses it to pull
   release notes from GitHub.
+- **terminal-notifier** (`brew install terminal-notifier`) — desktop notifications when
+  a scan finds something. Without it, findings still land in the report and the log.
 - **bumblebee** — the install-time gate. It's a separate upstream tool: a Go binary
   plus a threat-intel catalog. Install the binary (`go install …`) and clone the
   catalog to `~/bumblebee-src`, then source the guard in your shell:
@@ -144,6 +182,9 @@ Optional but recommended:
 
   Without it, `hiveguard add`/`scan` still work (OSV layer only) — you just lose the
   install-moment gating on npm/pip/go/cargo.
+
+Run `hiveguard doctor` at any time to see which of these are present and whether your
+install is healthy.
 
 ---
 
@@ -201,19 +242,29 @@ hiveguard scan --global        # scan global installs (npm -g, uv tools)
 hiveguard scan --no-refresh    # skip refreshing the bumblebee catalog
 ```
 
-### `hiveguard daily` — the scheduled scan
+### `hiveguard daily` — the scan behind the report
 
 ```bash
-hiveguard daily            # scan ~/Projects → HTML report + notification
-hiveguard daily ~/work     # scan another tree
+hiveguard daily                  # scan your home folder → HTML report + notification
+hiveguard daily ~/work ~/code    # scan one or more specific folders instead
 ```
 
+With **no folder**, `daily` scans your whole home folder, with a fixed set of
+heavyweight/system directories excluded (`Library`, `Caches`, `node_modules`, `.git`,
+`.cargo`, `go`, …) so the sweep stays fast and quiet. Pass one or more folders to scan
+those instead.
+
 Report: `~/.hiveguard/osv-projects.html`. Log: `~/.hiveguard/osv-daily.log`.
-The launchd agent (`com.hiveguard.osv-daily`) runs it daily; if the Mac was asleep,
-launchd runs it on wake. Run it now to test:
+
+**Re-running when today's report already exists** opens it and offers to rescan. Before
+opening, it also prints a **recovered summary** of the last scan's figures — projects,
+packages, vulns, critical, acknowledged, and "N new" — so you can recover the numbers
+from a notification you missed. Flags:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.hiveguard.osv-daily
+hiveguard daily --open     # just open the last report, never scan
+hiveguard daily --rescan   # force a fresh scan now, no prompt
+hiveguard daily --if-due   # scan only if today's report is missing/stale (used by the scheduler)
 ```
 
 The report groups findings by project, sorted by severity, with the fixed-in version and
@@ -221,25 +272,89 @@ osv.dev links for every advisory (theme-aware — adapts to light/dark):
 
 ![osv-daily report — vulnerabilities grouped by project and sorted by severity, each with max severity, fixed-in version, and links to osv.dev](docs/screenshots/osv-daily.png)
 
-#### Muting old projects
+#### New since last scan
+
+Each scan compares against the previous one **over the same set of folders**. What
+changed shows up as:
+
+- a **new since last scan** tile in the report header,
+- a `NEW +n` badge on the affected rows (with the new advisory IDs accented),
+- a `· N new` suffix on the notification and the done-line, and
+- a resolved-count footer line when findings have been fixed since last time.
+
+The very first scan of a folder set (no baseline yet) simply reports everything without
+"new" markers — the comparison starts from the next run.
+
+### Scheduling the daily scan
+
+Scheduling is a command you run — nothing is scheduled until you turn it on. You pick the
+**time** and the **folders**:
+
+```bash
+hiveguard schedule on                      # daily at 10:00, scanning your home folder
+hiveguard schedule on --hour 9 --min 30    # daily at 09:30
+hiveguard schedule on ~/work ~/code        # scan specific folders (multiple allowed)
+hiveguard schedule off                     # unschedule
+hiveguard schedule status                  # time, folders, loaded?, last run
+```
+
+- `on [--hour H] [--min M] [folder …]` — `H` is 0–23, `M` is 0–59 (default 10:00). With
+  no folders, the scan covers your home folder (with the heavyweight/system exclusions
+  above). Multiple folders are allowed. Re-running `on` replaces any existing schedule.
+- **Catch-up:** if your Mac is **asleep or off** at the scheduled time, the scan runs at
+  the next wake or startup instead — so you don't silently skip a day.
+- `off` removes the schedule; safe to run when nothing is scheduled.
+- `status` shows whether it's scheduled, at what time, which folders, whether the agent
+  is loaded, and the last recorded run.
+
+Under the hood this manages a launchd agent (`com.hiveguard.osv-daily`) that invokes
+`hiveguard daily --if-due`, so a catch-up run only actually scans when today's report is
+missing.
+
+### Muting old projects (`hiveguard ack`)
 
 An old project you don't run still has vulnerable pinned versions — but you don't need a
-fresh alert about it every morning. **Mute** it: muted projects and findings stop counting
-toward the totals and the notification, and move to a collapsed **Acknowledged** section
-so nothing is ever lost.
+fresh alert about it every morning. **Mute** it: muted projects and findings stop
+counting toward the totals and the notification, and move to a collapsed **Acknowledged**
+section so nothing is ever lost.
 
 ```bash
 hiveguard ack ~/Projects/old-app/package-lock.json          # mute a whole project
 hiveguard ack ~/Projects/app/requirements.txt django        # mute one package/finding
-hiveguard ack --list                                        # what's currently muted
+hiveguard ack --list                                        # what's currently muted (+ counts & since-dates)
 hiveguard ack --remove ~/Projects/old-app/package-lock.json # bring it back
+hiveguard ack --clear                                       # drop every acknowledgement
 ```
 
-Every row in the report carries a **mute** button that copies the exact command for that
-project or package — click, paste, run. Acknowledgements persist in
-`~/.hiveguard/osv-acks.json`, so the next scan and the daily agent both honour them. When
-everything found is acknowledged, the report shows zero and the daily notification stays
-quiet. The `<path>` is the source path (lockfile/manifest) shown on each project row.
+**Acknowledgements are advisory-scoped.** Muting accepts the advisories that are **known
+at the time you ack** — not the project or package forever. A genuinely **new** advisory
+that later appears in a muted project or package **still surfaces** (badged `muted` in
+the Active section) and **still fires the notification** — *new pierces the mute*. To
+accept it too, run the same `hiveguard ack …` again (or click the report's **re-ack**
+button), which folds the new advisory into the mute and goes quiet again.
+
+**Worked example:**
+
+```bash
+hiveguard ack ~/Projects/old-app/package-lock.json lodash
+# → "N known advisories acknowledged; NEW future advisories will still alert."
+```
+
+Later, a new advisory for `lodash` lands. On the next scan it appears in the **Active**
+section badged `muted`, and the daily alert fires. Click **re-ack** on that row (it
+copies the same `hiveguard ack …` command) — run it, and the project is quiet again,
+now with the new advisory folded in.
+
+Acknowledgements made **before** this advisory-scoped behavior existed are
+**grandfathered** on the next scan: everything present at that scan is accepted, and only
+advisories that appear *after* it will pierce the mute.
+
+Every row in the report carries a **mute** / **unmute** button that copies the exact
+command for that project or package — click, paste, run. Acknowledgements persist in
+`~/.hiveguard/osv-acks.json`, so the next scan and the scheduled agent both honour them.
+When everything active is acknowledged, the report shows zero and the daily notification
+stays quiet (until a new advisory pierces a mute). The `<path>` is the source path
+(lockfile/manifest) shown on each project row.
 
 ### `hiveguard brew` — read before you upgrade
 
@@ -266,6 +381,79 @@ Major jumps are separated from minor/patch updates; each card carries the packag
 description, its changelog for the version range, and a copy-ready `brew upgrade` command:
 
 ![brew changelog report — outdated formulae with descriptions, version ranges, expandable release notes, and a copy-to-clipboard upgrade command; major jumps highlighted](docs/screenshots/brew-changelog.png)
+
+### `hiveguard doctor` — check your install
+
+```bash
+hiveguard doctor          # read-only health check (exits non-zero on any ✖)
+hiveguard doctor --fix    # also apply safe, reversible repairs
+```
+
+`doctor` diagnoses install and migration health: how hiveguard was installed and its
+version, whether `hiveguard`/`hvg` on your `PATH` resolve to the active install (PATH
+shadowing), obsolete `~/bin` symlinks from older installs, the state of the launchd
+daily-scan agent, whether the bumblebee guard is sourced, and the prerequisites. Each
+line is ✓ (healthy) / ! (worth noting) / ✖ (broken).
+
+`--fix` only ever performs **safe, reversible** repairs: it removes obsolete `~/bin`
+symlinks that hiveguard itself created (the retired standalone command names and the `hg`
+alias), and boots out + removes a launchd agent that points at a missing or foreign
+install. It **never** edits `~/.zshrc` and **never** removes a non-symlink file — those
+are printed as instructions for you to apply.
+
+---
+
+## Migrating from the source install to Homebrew
+
+Already using a `git clone` + `./install.sh` install and want to switch to Homebrew?
+
+1. **Install via Homebrew:**
+
+   ```bash
+   brew install maximhoffman/hiveguard/hiveguard
+   ```
+
+2. **Clean up the old install:**
+
+   ```bash
+   hiveguard doctor --fix
+   ```
+
+   This removes the old `~/bin` symlinks and a stale launchd agent pointing at the clone.
+   (It won't touch `~/.zshrc` — if `doctor` flags the bumblebee guard line, update it by
+   hand as instructed.)
+
+3. **Verify the brew copy wins on your `PATH`:**
+
+   ```bash
+   which hiveguard        # should point at the Homebrew copy, not ~/bin
+   ```
+
+   If it still points at `~/bin`, reorder your `PATH` (or remove the leftover `~/bin`
+   symlinks `doctor` mentions) so the brew install resolves first.
+
+4. **Re-enable scheduling** (it replaces the old agent):
+
+   ```bash
+   hiveguard schedule on
+   ```
+
+5. **Optionally delete the old clone** once everything checks out.
+
+Your `~/.hiveguard` data — acknowledgements, cache, reports, and logs — carries over
+untouched; nothing is lost in the move.
+
+---
+
+## Where hiveguard keeps its data (`~/.hiveguard`)
+
+| Path | What it is |
+|---|---|
+| `osv-projects.html` | The latest daily report. |
+| `osv-daily.log` | One line per scan (counts + new/resolved). |
+| `osv-acks.json` | Your acknowledgements (advisory-scoped mutes). |
+| `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed. Override with `HIVEGUARD_STATE`. |
+| `cache/brew-releases/` | Cached `hiveguard brew` changelogs. |
 
 ---
 
@@ -301,3 +489,5 @@ on npm/pip/go/cargo you get **both** databases at once.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+</content>
+</invoke>
