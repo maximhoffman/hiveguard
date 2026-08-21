@@ -15,9 +15,9 @@
 #   hiveguard help         # this help
 #
 # The installed ~/bin/hiveguard is a symlink into the cloned repo, so `update`
-# just pulls that repo. `hg` and `hvg` are short aliases for `hiveguard`
-# (e.g. `hg brew`). There are no separate per-tool commands — everything is a
-# subcommand of hiveguard.
+# just pulls that repo. `hvg` is a short alias for `hiveguard` (e.g. `hvg
+# brew`). There are no separate per-tool commands — everything is a subcommand
+# of hiveguard.
 set -euo pipefail
 
 # -- resolve the repo root by following this script's symlink chain (BSD-safe) -

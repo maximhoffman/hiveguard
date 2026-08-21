@@ -34,7 +34,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 
 ## What's in the box
 
-`hiveguard` is the single command. `hg` and `hvg` are short aliases (`hg brew` ==
+`hiveguard` is the single command. `hvg` is a short alias (`hvg brew` ==
 `hiveguard brew`). Everything is a subcommand — there are no separate per-tool commands.
 
 | Subcommand | What it does |
@@ -84,7 +84,7 @@ Options:
 ./install.sh --hour 9        # daily scan at 09:00 instead of 10:00
 ```
 
-The installer symlinks `hiveguard` (plus the short aliases `hg` and `hvg`) into `~/bin`,
+The installer symlinks `hiveguard` (plus the short alias `hvg`) into `~/bin`,
 backs up any pre-existing file of the same name, and writes reports/logs to
 `~/.hiveguard/`. If you installed an older version that placed separate `safe-add` /
 `deps-audit` / `osv-daily` / `brew-changelog` commands on your `PATH`, the installer
@@ -149,14 +149,14 @@ Optional but recommended:
 
 ## Usage
 
-Everything runs through the single `hiveguard` command (or `hg` / `hvg`):
+Everything runs through the single `hiveguard` command (or `hvg`):
 
 ```bash
 hiveguard add   npm react-router     # gated install
 hiveguard scan  ~/Projects/app       # scan a project for known vulns
 hiveguard daily                      # full scan → HTML report
 hiveguard brew                       # changelogs before brew upgrade
-hg brew                              # same thing, short alias
+hvg brew                             # same thing, short alias
 ```
 
 ### `hiveguard add` — gated install

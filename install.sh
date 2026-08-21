@@ -45,7 +45,7 @@ fi
 
 # ── 2. symlink the CLI into ~/bin ───────────────────────────────────────────
 # hiveguard is the single entry point; add/scan/daily/brew are subcommands, so
-# only hiveguard (plus the short aliases hg/hvg) goes on PATH.
+# only hiveguard (plus the short alias hvg) goes on PATH.
 say "Linking hiveguard into $BIN"
 mkdir -p "$BIN" "$HOME/.hiveguard"
 
@@ -55,7 +55,7 @@ if [ -e "$target" ] && [ ! -L "$target" ]; then
 fi
 ln -sf "$REPO/bin/hiveguard" "$target"; ok "hiveguard → $REPO/bin/hiveguard"
 
-for a in hg hvg; do
+for a in hvg; do
   target="$BIN/$a"
   if [ -e "$target" ] && [ ! -L "$target" ]; then
     warn "$a already exists in $BIN and isn't ours — left as-is (use full 'hiveguard')"; continue
@@ -73,6 +73,16 @@ for old in safe-add deps-audit osv-daily brew-changelog; do
       rm -f "$target"; ok "removed obsolete standalone link: $old (now: hiveguard <action>)" ;;
   esac
 done
+
+# The 'hg' alias is retired (it collides with Mercurial's hg). It was a link
+# straight to bin/hiveguard (not bin/hg), so it needs its own check.
+target="$BIN/hg"
+if [ -L "$target" ]; then
+  case "$(readlink "$target")" in
+    "$REPO/bin/hiveguard"|*/hiveguard/bin/hiveguard)
+      rm -f "$target"; ok "obsolete alias removed: hg" ;;
+  esac
+fi
 case ":$PATH:" in
   *":$BIN:"*) ok "$BIN is on PATH" ;;
   *) warn "$BIN is NOT on your PATH — commands resolve only by full path until you add:"
@@ -107,4 +117,4 @@ else
   say "Skipping launchd agent (--no-agent)"
 fi
 
-echo; say "Done. Try:  hiveguard add npm left-pad --check-only   (or: hg brew)"
+echo; say "Done. Try:  hiveguard add npm left-pad --check-only   (or: hvg brew)"
