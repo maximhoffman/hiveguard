@@ -20,17 +20,30 @@
 # subcommand of hiveguard.
 set -euo pipefail
 
-# -- resolve the repo root by following this script's symlink (BSD-safe) -----
+# -- resolve the repo root by following this script's symlink chain (BSD-safe) -
 src="$0"
-if [ -L "$src" ]; then
+hops=0
+while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
   t="$(readlink "$src")"
   case "$t" in
     /*) src="$t" ;;
     *)  src="$(cd "$(dirname "$src")" && pwd)/$t" ;;
   esac
-fi
+  hops=$((hops + 1))
+done
 REPO="$(cd "$(dirname "$src")/.." && pwd)"
 BIN="$REPO/bin"
+
+# -- how was hiveguard installed? brew ships a VERSION file; git has .git ------
+install_method() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo brew
+  elif [ -e "$REPO/.git" ]; then
+    echo git
+  else
+    echo unknown
+  fi
+}
 
 cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
 
@@ -51,7 +64,12 @@ case "$cmd" in
     echo "✅ Updated. A new report appears on the next scan (or run: hiveguard daily)"
     ;;
   version|--version|-v)
-    git -C "$REPO" describe --tags --always --dirty 2>/dev/null || git -C "$REPO" rev-parse --short HEAD
+    if [ -f "$REPO/VERSION" ]; then
+      v="$(sed -n 's/^version=//p' "$REPO/VERSION" | head -n1)"
+      echo "$v (brew)"
+    else
+      git -C "$REPO" describe --tags --always --dirty 2>/dev/null || git -C "$REPO" rev-parse --short HEAD
+    fi
     ;;
   where)
     echo "$REPO"
