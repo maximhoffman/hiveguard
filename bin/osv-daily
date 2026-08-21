@@ -211,18 +211,90 @@ for r in d.get("results", []):
         name = p.get("package", {}).get("name", "")
         cur_findings.setdefault(src, {})[name] = [v.get("id", "") for v in vulns]
 
-# --- acknowledgements ------------------------------------------------------
-ack_projects, ack_packages = set(), {}
+# --- acknowledgements (schema v2, advisory-scoped) -------------------------
+# Read the ack store, tolerant of a v1-shaped store (arrays), which we treat as
+# open-ended (cover-all). Build:
+#   project_ack[src]      = ids-map {pkg:[ids]} | None   (None = cover-all)
+#   package_ack[src][pkg] = ids-list [ids]      | None   (None = cover-all)
+acks_raw = None
 try:
     with open(os.environ.get("ACKS", "")) as f:
-        a = json.load(f)
-    ack_projects = set(a.get("projects", []) or [])
-    ack_packages = {k: set(v) for k, v in (a.get("packages", {}) or {}).items()}
+        acks_raw = json.load(f)
 except Exception:
-    pass
+    acks_raw = None
 
-def is_acked(src, name):
-    return src in ack_projects or name in ack_packages.get(src, set())
+project_ack, package_ack = {}, {}
+if isinstance(acks_raw, dict):
+    projs = acks_raw.get("projects")
+    if isinstance(projs, dict):                       # v2: {src: {ids, since}}
+        for src, ent in projs.items():
+            project_ack[src] = (ent or {}).get("ids") if isinstance(ent, dict) else None
+    elif isinstance(projs, list):                     # v1: [src, …] → cover-all
+        for src in projs:
+            project_ack[src] = None
+    pkgs = acks_raw.get("packages")
+    if isinstance(pkgs, dict):
+        for src, sub in pkgs.items():
+            m = {}
+            if isinstance(sub, dict):                 # v2: {pkg: {ids, since}}
+                for pkg, ent in sub.items():
+                    m[pkg] = (ent or {}).get("ids") if isinstance(ent, dict) else None
+            elif isinstance(sub, list):               # v1: [pkg, …] → cover-all
+                for pkg in sub:
+                    m[pkg] = None
+            package_ack[src] = m
+
+def id_suppressed(src, name, vid):
+    # An advisory id is suppressed iff a project- or package-level ack covers it:
+    # a None ids-set covers everything, otherwise the id must be listed.
+    if src in project_ack:
+        pj = project_ack[src]
+        if pj is None or vid in ((pj.get(name) if isinstance(pj, dict) else None) or []):
+            return True
+    pk = package_ack.get(src, {})
+    if name in pk:
+        pl = pk[name]
+        if pl is None or vid in pl:
+            return True
+    return False
+
+def is_muted(src, name):
+    # True when SOME ack (project or package) applies to this (src, pkg), whether
+    # cover-all or advisory-scoped — used to flag a mute-piercing active fragment.
+    return src in project_ack or name in package_ack.get(src, {})
+
+# --- one-time backfill of open-ended (legacy) mutes ------------------------
+# Grandfather any ack whose ids is null (open-ended) to the advisories seen in
+# THIS scan, so genuinely new advisories pierce the mute on later runs. This run
+# still treats the open-ended mute as cover-all (project_ack/package_ack already
+# captured the None). Writes the ack store atomically, only when it changed.
+def backfill_open_ended(a, cur, path):
+    if not isinstance(a, dict) or not path:
+        return
+    changed = False
+    projs = a.get("projects")
+    if isinstance(projs, dict):
+        for src, ent in projs.items():
+            if isinstance(ent, dict) and ent.get("ids") is None and src in cur:
+                ent["ids"] = cur[src]          # {pkg:[ids]} — matches state_proj
+                changed = True
+    pkgs = a.get("packages")
+    if isinstance(pkgs, dict):
+        for src, sub in pkgs.items():
+            if not isinstance(sub, dict):
+                continue
+            for pkg, ent in sub.items():
+                if isinstance(ent, dict) and ent.get("ids") is None \
+                   and src in cur and pkg in cur[src]:
+                    ent["ids"] = cur[src][pkg]  # [ids] — matches state_pkg
+                    changed = True
+    if changed:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(a, f, indent=2)
+        os.replace(tmp, path)
+
+backfill_open_ended(acks_raw, cur_findings, os.environ.get("ACKS", ""))
 
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
@@ -235,7 +307,13 @@ def sev_bucket(score):
     if s >= 4: return ("med",  "MED")
     return ("low", "LOW")
 
-# split every project's vulnerable packages into active vs acknowledged
+# --- partition each vulnerable package into active / acknowledged fragments --
+# A package's advisories split into UNCOVERED (active) and COVERED (acked) ids.
+# Each non-empty side becomes a "fragment" row; a mixed package appears in BOTH
+# sections. Per-fragment severity = max over its ids (id→severity from the
+# osv-scanner groups, falling back to the package max). new_ids apply to the
+# active fragment only; an active fragment of an otherwise-muted package is a
+# "pierced" fragment (rendered with a muted badge + a re-ack button).
 active, acked = [], []
 for r in d.get("results", []):
     src = r.get("source", {}).get("path", "")
@@ -244,30 +322,53 @@ for r in d.get("results", []):
         vulns = p.get("vulnerabilities") or []
         if not vulns: continue
         info = p.get("package", {})
+        name = info.get("name", "")
+        ids = [v.get("id", "") for v in vulns]
         maxsev = max((float(g.get("max_severity", "0") or 0) for g in (p.get("groups") or [])), default=0.0)
+        # id → severity from the groups (max when an id spans several groups)
+        id2sev = {}
+        for g in (p.get("groups") or []):
+            try: gs = float(g.get("max_severity", "0") or 0)
+            except Exception: gs = 0.0
+            for gid in (g.get("ids") or []):
+                if gid not in id2sev or gs > id2sev[gid]:
+                    id2sev[gid] = gs
+        def frag_sev(frag_ids, _m=maxsev, _s=id2sev):
+            return max((_s.get(i, _m) for i in frag_ids), default=0.0)
         fixes = []
         for v in vulns:
-            for a in v.get("affected", []) or []:
-                for rng in a.get("ranges", []) or []:
+            for af in v.get("affected", []) or []:
+                for rng in af.get("ranges", []) or []:
                     for e in rng.get("events", []) or []:
                         if e.get("fixed"): fixes.append(e["fixed"])
-        pkg = {
-            "name": info.get("name", ""), "version": info.get("version", ""),
-            "eco": info.get("ecosystem", ""), "sev": maxsev,
-            "fix": max(fixes, key=vtuple) if fixes else "",
-            "count": len(vulns), "ids": [v.get("id", "") for v in vulns],
-        }
+        fix = max(fixes, key=vtuple) if fixes else ""
+        eco, version = info.get("ecosystem", ""), info.get("version", "")
+        covered   = [i for i in ids if id_suppressed(src, name, i)]
+        uncovered = [i for i in ids if not id_suppressed(src, name, i)]
+        muted = is_muted(src, name)
         # advisory ids not present for this (src, pkg) in the previous scan
-        base_ids = baseline_findings.get(src, {}).get(pkg["name"], []) if baseline_valid else []
-        pkg["new_ids"] = [i for i in pkg["ids"] if i not in base_ids] if baseline_valid else []
-        (ack_pkgs if is_acked(src, pkg["name"]) else act_pkgs).append(pkg)
+        base_ids = baseline_findings.get(src, {}).get(name, []) if baseline_valid else []
+        if uncovered:
+            act_pkgs.append({
+                "name": name, "version": version, "eco": eco, "fix": fix,
+                "sev": frag_sev(uncovered), "count": len(uncovered), "ids": uncovered,
+                "new_ids": [i for i in uncovered if i not in base_ids] if baseline_valid else [],
+                "muted": muted,                       # pierced a mute → muted badge + re-ack
+                "reack_project": src in project_ack,  # re-ack form: project vs package
+            })
+        if covered:
+            ack_pkgs.append({
+                "name": name, "version": version, "eco": eco, "fix": fix,
+                "sev": frag_sev(covered), "count": len(covered), "ids": covered,
+                "new_ids": [],
+            })
     if act_pkgs:
         act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
         active.append({"src": src, "pkgs": act_pkgs, "maxsev": max(p["sev"] for p in act_pkgs)})
     if ack_pkgs:
         ack_pkgs.sort(key=lambda x: x["sev"], reverse=True)
         acked.append({"src": src, "pkgs": ack_pkgs, "maxsev": max(p["sev"] for p in ack_pkgs),
-                      "whole": src in ack_projects})
+                      "whole": src in project_ack})
 active.sort(key=lambda x: x["maxsev"], reverse=True)
 acked.sort(key=lambda x: x["maxsev"], reverse=True)
 
@@ -326,19 +427,29 @@ def cp_btn(cmd, label):
     return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
             f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
 
-def pkg_row(p, src, muted):
+def pkg_row(p, src, section):
     cls, lbl = sev_bucket(p["sev"])
+    active_sec = section == "active"
+    pierced = active_sec and p.get("muted")   # active fragment of a muted package
     # NEW badge + accented links apply to active rows only (matches the tile count)
-    new_ids = set(p.get("new_ids") or []) if not muted else set()
+    new_ids = set(p.get("new_ids") or []) if active_sec else set()
     idlinks = " ".join(
         f'<a class="{"new" if i in new_ids else ""}" '
         f'href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
         for i in p["ids"][:4])
     more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"]) > 4 else ""
-    badge = f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else ""
+    badge = ('<span class="mutedbadge">muted</span>' if pierced else "") \
+          + (f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else "")
     fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
-    if muted:
+    if section == "acked":
         btn = cp_btn("hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute")
+    elif pierced:
+        # re-ack folds the pierced advisory back into the existing mute; use the
+        # project form when the coverage came from a whole-project mute.
+        if p.get("reack_project"):
+            btn = cp_btn("hiveguard ack " + shlex.quote(src), "re-ack")
+        else:
+            btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack")
     else:
         btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute")
     return (f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
@@ -349,7 +460,7 @@ def pkg_row(p, src, muted):
             f'<td class="act">{btn}</td></tr>')
 
 def proj_card(pr, muted):
-    rows = "".join(pkg_row(p, pr["src"], muted) for p in pr["pkgs"])
+    rows = "".join(pkg_row(p, pr["src"], "acked" if muted else "active") for p in pr["pkgs"])
     pcls, plbl = sev_bucket(pr["maxsev"])
     if muted:
         head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
@@ -418,6 +529,7 @@ h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
 .stat.crit .n{{color:var(--crit)}}
 .stat.new .n{{color:var(--accent)}}
 .newbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--accent);color:#fff;letter-spacing:.02em}}
+.mutedbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--high-s);color:var(--high);letter-spacing:.02em}}
 details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
 details.proj.acked{{opacity:.72}}
 details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
