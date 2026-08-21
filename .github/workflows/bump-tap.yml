@@ -1,0 +1,55 @@
+name: Bump Homebrew tap
+
+# On a version tag (v1.2.3), render packaging/hiveguard.rb with the tag's
+# tarball URL + sha256 and publish it to the tap repo as Formula/hiveguard.rb.
+# Requires a repo secret TAP_GITHUB_TOKEN: a fine-grained PAT scoped to
+# maximhoffman/homebrew-hiveguard with Contents: read and write.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out hiveguard
+        uses: actions/checkout@v4
+
+      - name: Compute tarball URL + sha256
+        id: src
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          curl -fsSL "$url" -o /tmp/src.tar.gz
+          [ -s /tmp/src.tar.gz ] || { echo "empty tarball download" >&2; exit 1; }
+          sha="$(sha256sum /tmp/src.tar.gz | awk '{print $1}')"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Rendered $url ($sha)"
+
+      - name: Render the formula
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          sed -e "s#__URL__#${{ steps.src.outputs.url }}#" \
+              -e "s#__SHA256__#${{ steps.src.outputs.sha }}#" \
+              packaging/hiveguard.rb > out/hiveguard.rb
+          grep -q '__URL__\|__SHA256__' out/hiveguard.rb && { echo "placeholder left unfilled" >&2; exit 1; } || true
+
+      - name: Publish to the tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/maximhoffman/homebrew-hiveguard.git" tap
+          mkdir -p tap/Formula
+          cp out/hiveguard.rb tap/Formula/hiveguard.rb
+          cd tap
+          git config user.name  "hiveguard-bot"
+          git config user.email "noreply@github.com"
+          git add Formula/hiveguard.rb
+          git commit -m "hiveguard ${GITHUB_REF_NAME#v}" || { echo "no formula change"; exit 0; }
+          git push
