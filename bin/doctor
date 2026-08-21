@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# doctor — diagnose hiveguard install/migration health and, with --fix, perform
+# only SAFE, REVERSIBLE repairs. Run it after switching from the git install to
+# a Homebrew install (or whenever `hiveguard` behaves oddly).
+#
+#   hiveguard doctor          # read-only health check (exits non-zero on any ✖)
+#   hiveguard doctor --fix    # also apply safe, reversible repairs
+#
+# Checks: install method + version, PATH shadowing, ~/bin leftovers, the launchd
+# daily-scan agent, the bumblebee shell guard, and prerequisites. Each line is
+# ✓ (healthy) / ! (worth noting) / ✖ (broken); a plain run exits non-zero if any
+# ✖ is present, so it is scriptable.
+#
+# --fix only ever: boots out + removes a launchd plist that points at a missing
+# or foreign install, removes our own obsolete ~/bin symlinks (the retired
+# standalone command names, plus the `hg` alias). It NEVER touches a non-symlink
+# file in ~/bin and NEVER edits ~/.zshrc — those are printed as instructions.
+set -euo pipefail
+
+FIX=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fix) FIX=1 ;;
+    -h|--help) grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown flag: $1 (see: hiveguard doctor --help)" >&2; exit 2 ;;
+  esac; shift
+done
+
+# -- resolve this script's real dir + repo root (follow the symlink chain) -----
+resolve_link() {  # print the final target of a symlink chain (BSD-safe)
+  local p="$1" hops=0 t
+  while [ -L "$p" ] && [ "$hops" -lt 10 ]; do
+    t="$(readlink "$p")"
+    case "$t" in
+      /*) p="$t" ;;
+      *)  p="$(cd "$(dirname "$p")" 2>/dev/null && pwd)/$t" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  printf '%s' "$p"
+}
+src="$(resolve_link "$0")"
+BINDIR="$(cd "$(dirname "$src")" && pwd)"
+REPO="$(cd "$BINDIR/.." && pwd)"
+
+BIN="$HOME/bin"
+# The launchd label is fixed in production. It is overridable ONLY so the test
+# suite can point --fix at a throwaway label and never bootout the real user
+# agent; do not set HIVEGUARD_TEST_LABEL yourself.
+LABEL="${HIVEGUARD_TEST_LABEL:-com.hiveguard.osv-daily}"
+LA_DIR="$HOME/Library/LaunchAgents"
+PLIST="$LA_DIR/$LABEL.plist"
+LOG="$HOME/.hiveguard/osv-daily.log"
+UID_="$(id -u)"
+DOMAIN="gui/$UID_/$LABEL"
+
+# -- output helpers ----------------------------------------------------------
+if [ -t 1 ]; then
+  C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_B=$'\033[1m'; C_D=$'\033[2m'; C_0=$'\033[0m'
+else
+  C_G=''; C_Y=''; C_R=''; C_B=''; C_D=''; C_0=''
+fi
+FAIL=0
+sec()    { printf '\n%s▸ %s%s\n' "$C_B" "$1" "$C_0"; }
+ok()     { printf '  %s✓%s %s\n' "$C_G" "$C_0" "$1"; }
+warn()   { printf '  %s!%s %s\n' "$C_Y" "$C_0" "$1"; }
+bad()    { printf '  %s✖%s %s\n' "$C_R" "$C_0" "$1"; FAIL=1; }
+fixed()  { printf '  %s✓%s fixed: %s\n' "$C_G" "$C_0" "$1"; }
+remedy() { printf '    %s→ %s%s\n' "$C_D" "$1" "$C_0"; }
+
+# -- install method / active entry point -------------------------------------
+install_method() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo brew
+  elif [ -e "$REPO/.git" ]; then
+    echo git
+  else
+    echo unknown
+  fi
+}
+METHOD="$(install_method)"
+
+# The hiveguard entry point that the active install *should* resolve to. For a
+# brew install that is the brew-prefix symlink (stable across upgrades); for a
+# git checkout it is this repo's bin/hiveguard.
+active_entry() {
+  if [ "$METHOD" = brew ]; then
+    echo "$(brew --prefix 2>/dev/null || echo /opt/homebrew)/bin/hiveguard"
+  else
+    echo "$REPO/bin/hiveguard"
+  fi
+}
+
+# Is $1 a symlink that points into a hiveguard install (repo clone or prefix)?
+is_ours() {
+  local t; t="$(readlink "$1" 2>/dev/null)" || return 1
+  case "$t" in "$REPO"/*|*/hiveguard/bin/*|*/hiveguard/*) return 0 ;; esac
+  case "$(resolve_link "$1")" in "$REPO"/*|*/hiveguard/*) return 0 ;; esac
+  return 1
+}
+
+# ── 1. install method + version ─────────────────────────────────────────────
+sec "Install method & version"
+case "$METHOD" in
+  brew)
+    v="$(awk -F= '/^version=/{print $2; exit}' "$REPO/VERSION" 2>/dev/null)"
+    ok "installed via Homebrew — version ${v:-unknown}"
+    ok "libexec: $REPO" ;;
+  git)
+    v="$(git -C "$REPO" describe --tags --always --dirty 2>/dev/null || git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    ok "installed from a git clone — version $v"
+    ok "repo: $REPO" ;;
+  *)
+    warn "cannot tell how hiveguard was installed (no VERSION file, no .git in $REPO)"
+    remedy "reinstall from a clean clone, or via Homebrew once the formula ships" ;;
+esac
+ok "active entry point should be: $(active_entry)"
+
+# ── 2. PATH shadowing ───────────────────────────────────────────────────────
+sec "PATH resolution"
+check_shadow() {  # $1 = command name (hiveguard | hvg)
+  local name="$1" first real_first active real_active
+  first="$(command -v "$name" 2>/dev/null || true)"
+  if [ -z "$first" ]; then
+    warn "$name is not on your PATH — commands only resolve by full path"
+    remedy "add ~/bin (or the brew prefix) to PATH, then open a new terminal"
+    return
+  fi
+  real_first="$(resolve_link "$first")"
+  active="$(active_entry)"; real_active="$(resolve_link "$active")"
+  if [ "$real_first" = "$real_active" ]; then
+    ok "$name → $first (resolves to the active install)"
+  else
+    bad "$name on PATH is $first → $real_first, but the active install is $active"
+    remedy "reorder PATH so the active install wins (\`type -a $name\` shows the order); doctor won't edit PATH for you"
+  fi
+}
+check_shadow hiveguard
+check_shadow hvg
+
+# ── 3. ~/bin leftovers ──────────────────────────────────────────────────────
+# Retired standalone command names + the retired `hg` alias. Under a brew
+# install every ours-only ~/bin symlink is obsolete; hg is obsolete always.
+sec "~/bin symlinks"
+RETIRED="safe-add deps-audit osv-daily brew-changelog"
+subcmd_for() {  # map a retired standalone name to its hiveguard subcommand
+  case "$1" in
+    safe-add) echo "hiveguard add" ;; deps-audit) echo "hiveguard scan" ;;
+    osv-daily) echo "hiveguard daily" ;; brew-changelog) echo "hiveguard brew" ;;
+    *) echo "hiveguard $1" ;;
+  esac
+}
+# Auto-removable by --fix: retired standalone names (only when method=brew) and
+# hg (always). The primary names (hiveguard/hvg/bumblebee-guard.sh) are never
+# auto-removed — removing an active entry point is not a safe, reversible repair.
+for old in $RETIRED; do
+  t="$BIN/$old"; sub="$(subcmd_for "$old")"
+  [ -L "$t" ] || { [ -e "$t" ] && warn "$old exists in ~/bin but is not our symlink — left as-is"; continue; }
+  is_ours "$t" || { warn "$old in ~/bin points outside hiveguard ($(readlink "$t")) — left as-is"; continue; }
+  if [ "$METHOD" = brew ]; then
+    if [ "$FIX" -eq 1 ]; then
+      rm -f "$t"; fixed "removed obsolete standalone link ~/bin/$old (now: $sub)"
+    else
+      warn "obsolete standalone link ~/bin/$old → $(readlink "$t") (now: $sub)"
+      remedy "run: hiveguard doctor --fix"
+    fi
+  else
+    warn "leftover standalone link ~/bin/$old → $(readlink "$t") (retired; now: $sub)"
+    remedy "harmless under a git install; brew installs remove it via: hiveguard doctor --fix"
+  fi
+done
+
+# hg alias — retired regardless of install method (collides with Mercurial).
+t="$BIN/hg"
+if [ -L "$t" ] && is_ours "$t"; then
+  if [ "$FIX" -eq 1 ]; then
+    rm -f "$t"; fixed "removed obsolete alias ~/bin/hg (collided with Mercurial)"
+  else
+    warn "obsolete alias ~/bin/hg → $(readlink "$t") (collides with Mercurial's hg)"
+    remedy "run: hiveguard doctor --fix"
+  fi
+elif [ -e "$t" ] && [ ! -L "$t" ]; then
+  warn "~/bin/hg exists but is not our symlink — left as-is"
+fi
+
+# Primary names: under brew a clone-pointing symlink is an obsolete leftover
+# (and the PATH-shadow hazard above). Report but never auto-remove.
+if [ "$METHOD" = brew ]; then
+  for p in hiveguard hvg bumblebee-guard.sh; do
+    t="$BIN/$p"
+    [ -L "$t" ] && is_ours "$t" || continue
+    warn "~/bin/$p → $(readlink "$t") still points into a clone, but the active install is brew"
+    remedy "once brew's copies are on PATH, remove it yourself: rm ~/bin/$p"
+  done
+fi
+
+# ── 4. launchd daily-scan agent ─────────────────────────────────────────────
+sec "launchd daily-scan agent"
+plist_prog0() {  # first ProgramArguments <string> (robust to line layout)
+  [ -f "$PLIST" ] || return 0
+  awk '
+    /<key>ProgramArguments<\/key>/ { inpa=1 }
+    inpa && match($0, /<string>[^<]*<\/string>/) {
+      s=substr($0, RSTART, RLENGTH); sub(/<string>/,"",s); sub(/<\/string>/,"",s); print s; exit
+    }
+  ' "$PLIST"
+}
+plist_time() {
+  [ -f "$PLIST" ] || return 0
+  local h m
+  h="$(sed -n 's/.*<key>Hour<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$PLIST")"
+  m="$(sed -n 's/.*<key>Minute<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$PLIST")"
+  printf '%02d:%02d' "${h:-0}" "${m:-0}"
+}
+xml_unescape() { printf '%s' "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'; }
+
+if [ ! -f "$PLIST" ]; then
+  warn "daily OSV scan is NOT scheduled (no $PLIST)"
+  remedy "schedule it with: hiveguard schedule on --hour 10"
+else
+  prog0="$(xml_unescape "$(plist_prog0)")"
+  when="$(plist_time)"
+  active="$(active_entry)"
+  loaded="no"; launchctl print "$DOMAIN" >/dev/null 2>&1 && loaded="yes"
+  stale=0; reason=""
+  if [ -z "$prog0" ]; then
+    stale=1; reason="its ProgramArguments are empty"
+  elif [ ! -e "$prog0" ]; then
+    stale=1; reason="it runs $prog0, which no longer exists"
+  elif [ "$(resolve_link "$prog0")" != "$(resolve_link "$active")" ]; then
+    stale=1; reason="it runs $prog0, a different install than the active one ($active)"
+  fi
+
+  if [ "$stale" -eq 1 ]; then
+    if [ "$FIX" -eq 1 ]; then
+      launchctl bootout "$DOMAIN" 2>/dev/null || true
+      rm -f "$PLIST"
+      fixed "removed the stale agent ($reason)"
+      remedy "re-enable with: hiveguard schedule on --hour ${when%%:*}"
+    else
+      bad "stale daily-scan agent: $reason"
+      remedy "run: hiveguard doctor --fix   (then: hiveguard schedule on --hour ${when%%:*})"
+    fi
+  else
+    ok "agent present, scheduled at $when, program: $prog0"
+    if [ "$loaded" = yes ]; then ok "agent is loaded (launchctl)"; else warn "agent is not loaded — it loads on next login"; fi
+    ok "catch-up: if the Mac is asleep/off at $when the scan runs at the next wake or startup"
+  fi
+fi
+
+# ── 5. bumblebee shell guard ────────────────────────────────────────────────
+sec "bumblebee shell guard (~/.zshrc)"
+ZSHRC="$HOME/.zshrc"
+guard_line="$(grep -n 'bumblebee-guard.sh' "$ZSHRC" 2>/dev/null | head -n1 || true)"
+if [ -z "$guard_line" ]; then
+  warn "bumblebee-guard.sh is not sourced in ~/.zshrc — install-time gating is off"
+  remedy "add:  source \"$BIN/bumblebee-guard.sh\""
+else
+  # extract the sourced path (best-effort) and confirm it still exists
+  sp="$(printf '%s' "$guard_line" | sed -n 's/.*source[[:space:]]*["'\'']\{0,1\}\([^"'\'' ]*bumblebee-guard\.sh\).*/\1/p' | head -n1 || true)"
+  sp_expanded="${sp/#\$HOME/$HOME}"; sp_expanded="${sp_expanded/#\~/$HOME}"
+  if [ -n "$sp_expanded" ] && [ ! -e "$sp_expanded" ]; then
+    bad "~/.zshrc sources $sp, which no longer exists"
+    remedy "replace that line with:  source \"$(active_entry | sed 's:/hiveguard$:/bumblebee-guard.sh:')\""
+  elif [ "$METHOD" = brew ] && printf '%s' "$sp" | grep -q "$BIN/bumblebee-guard.sh"; then
+    warn "~/.zshrc sources the old ~/bin path under a brew install"
+    remedy "replace that line with:  source \"$(brew --prefix 2>/dev/null || echo /opt/homebrew)/bin/bumblebee-guard.sh\""
+  else
+    ok "sourced in ~/.zshrc${sp:+ ($sp)}"
+  fi
+fi
+
+# ── 6. prerequisites ────────────────────────────────────────────────────────
+sec "Prerequisites"
+req() { command -v "$1" >/dev/null 2>&1 && ok "$1 (required)" || { bad "$1 missing (required)"; remedy "$2"; }; }
+opt() { command -v "$1" >/dev/null 2>&1 && ok "$1 (optional)" || { warn "$1 missing (optional)"; remedy "$2"; }; }
+req jq          "brew install jq"
+req osv-scanner "brew install osv-scanner"
+opt gh                "brew install gh   (brew-changelog uses it)"
+opt terminal-notifier "brew install terminal-notifier   (desktop alerts on findings)"
+if [ -d "$HOME/bumblebee-src/threat_intel" ]; then
+  ok "bumblebee threat catalog (~/bumblebee-src)"
+else
+  warn "bumblebee threat catalog not found (optional)"
+  remedy "clone it into ~/bumblebee-src (see README) for install-time gating"
+fi
+
+# ── summary ─────────────────────────────────────────────────────────────────
+echo
+if [ "$FAIL" -ne 0 ]; then
+  printf '%s✖ Problems found.%s Re-run with --fix for the safe, reversible repairs; address the rest by hand.\n' "$C_R" "$C_0"
+  exit 1
+fi
+printf '%s✓ hiveguard looks healthy.%s\n' "$C_G" "$C_0"
+exit 0

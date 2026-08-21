@@ -10,6 +10,7 @@
 #
 # Management:
 #   hiveguard schedule on|off|status   # schedule the daily scan (time + folders)
+#   hiveguard doctor [--fix]   # diagnose install/migration health (repair with --fix)
 #   hiveguard update       # git pull the repo + re-run installer (scripts & agent)
 #   hiveguard version      # installed version (git describe)
 #   hiveguard where        # print the repo path
@@ -55,6 +56,7 @@ case "$cmd" in
   brew)  exec "$BIN/brew-changelog" "$@" ;;
   ack)   exec "$BIN/osv-ack" "$@" ;;
   schedule) exec "$BIN/daily-schedule" "$@" ;;
+  doctor)   exec "$BIN/doctor" "$@" ;;
 
   update)
     echo "🐝 Updating hiveguard ($REPO)"
