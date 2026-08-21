@@ -5,12 +5,13 @@
   <key>Label</key><string>com.hiveguard.osv-daily</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__BIN__/hiveguard</string>
+    <string>__HIVEGUARD__</string>
     <string>daily</string>
+    <string>--if-due</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>__HOUR__</integer><key>Minute</key><integer>__MIN__</integer></dict>
-  <key>RunAtLoad</key><false/>
+  <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>__HOME__/.hiveguard/osv-daily.out.log</string>
   <key>StandardErrorPath</key><string>__HOME__/.hiveguard/osv-daily.err.log</string>
   <key>EnvironmentVariables</key>

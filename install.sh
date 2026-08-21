@@ -101,17 +101,14 @@ else
 fi
 
 # ── 4. daily launchd agent ──────────────────────────────────────────────────
+# Scheduling lives in the `hiveguard schedule` command now (it also lets the
+# user pick the time and folders, and adds boot/wake catch-up). Delegate to it
+# with the home-folder default; the plist template is kept as documentation.
 if [ "$WANT_AGENT" -eq 1 ]; then
   say "Scheduling daily OSV scan at $(printf '%02d:%02d' "$HOUR" "$MIN")"
-  PLIST="$HOME/Library/LaunchAgents/com.hiveguard.osv-daily.plist"
-  mkdir -p "$HOME/Library/LaunchAgents"
-  sed -e "s#__BIN__#$BIN#g" -e "s#__HOME__#$HOME#g" \
-      -e "s#__HOUR__#$HOUR#g" -e "s#__MIN__#$MIN#g" \
-      "$REPO/launchd/com.hiveguard.osv-daily.plist.template" > "$PLIST"
+  "$REPO/bin/hiveguard" schedule on --hour "$HOUR" --min "$MIN" \
+    && ok "launchd agent scheduled (change it with: hiveguard schedule)"
   UID_="$(id -u)"
-  launchctl bootout   "gui/$UID_/com.hiveguard.osv-daily" 2>/dev/null || true
-  launchctl bootstrap "gui/$UID_" "$PLIST" && ok "launchd agent loaded"
-  launchctl enable    "gui/$UID_/com.hiveguard.osv-daily" 2>/dev/null || true
   echo "     test now:  launchctl kickstart -k gui/$UID_/com.hiveguard.osv-daily"
 else
   say "Skipping launchd agent (--no-agent)"

@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# daily-schedule — manage the launchd agent that runs the daily OSV scan.
+# You pick the TIME of day and the FOLDERS to scan; scheduling is a user
+# choice, not something the installer forces. The agent is labelled
+# com.hiveguard.osv-daily and lives at
+# ~/Library/LaunchAgents/com.hiveguard.osv-daily.plist.
+#
+#   hiveguard schedule on  [--hour H] [--min M] [folder ...]  # (re)schedule
+#   hiveguard schedule off                                    # unschedule
+#   hiveguard schedule status                                 # show current (default)
+#
+# on   — H∈0..23, M∈0..59 (default 10:00). With no folders, the scan covers
+#        your home folder (osv-daily's default). The agent runs at the chosen
+#        time AND catches up on boot/login/wake: it is loaded with RunAtLoad and
+#        a calendar interval, and always invokes the scan with --if-due, so a
+#        catch-up run only actually scans when today's report is missing/stale.
+#        Re-running `on` replaces any existing (incl. legacy) agent.
+# off  — unload and remove the agent; safe to run when nothing is scheduled.
+# status — is it scheduled, at what time, which folders, is it loaded, last run.
+set -euo pipefail
+
+LABEL="com.hiveguard.osv-daily"
+LA_DIR="$HOME/Library/LaunchAgents"
+PLIST="$LA_DIR/$LABEL.plist"
+LOG="$HOME/.hiveguard/osv-daily.log"
+UID_="$(id -u)"
+
+usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
+
+# -- resolve this script's real dir + repo root (follow the symlink chain) -----
+src="$0"; hops=0
+while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
+  t="$(readlink "$src")"
+  case "$t" in
+    /*) src="$t" ;;
+    *)  src="$(cd "$(dirname "$src")" && pwd)/$t" ;;
+  esac
+  hops=$((hops + 1))
+done
+BINDIR="$(cd "$(dirname "$src")" && pwd)"
+REPO="$(cd "$BINDIR/.." && pwd)"
+
+# The plist must point at a STABLE hiveguard path. A brew install ships a VERSION
+# file (method=brew) next to the repo root; use the brew-prefix bin symlink,
+# which survives version upgrades (never the versioned Cellar path). A git
+# checkout uses this script's sibling hiveguard.
+hiveguard_bin() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo "$(brew --prefix)/bin/hiveguard"
+  else
+    echo "$BINDIR/hiveguard"
+  fi
+}
+
+xml_escape()   { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+xml_unescape() { printf '%s' "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'; }
+
+# Emit the plist to $PLIST. Args: HOUR MINUTE [folder ...]. ProgramArguments has
+# a variable number of folder entries, so we generate the XML directly (fixed
+# keys + a loop over folders) rather than sed-templating a fixed file.
+write_plist() {
+  local hour="$1" min="$2"; shift 2
+  local hg; hg="$(hiveguard_bin)"
+  mkdir -p "$LA_DIR"
+  {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$hg")</string>
+    <string>daily</string>
+EOF
+    for f in "$@"; do
+      printf '    <string>%s</string>\n' "$(xml_escape "$f")"
+    done
+    cat <<EOF
+    <string>--if-due</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>$min</integer></dict>
+  <key>StandardOutPath</key><string>$(xml_escape "$HOME")/.hiveguard/osv-daily.out.log</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$HOME")/.hiveguard/osv-daily.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+</dict>
+</plist>
+EOF
+  } > "$PLIST"
+}
+
+# Read back the folder entries (everything between `daily` and `--if-due`).
+plist_folders() {
+  [ -f "$PLIST" ] || return 0
+  awk '
+    /<string>daily<\/string>/    { grab=1; next }
+    /<\/array>/                  { grab=0 }
+    grab && /<string>--if-due<\/string>/ { grab=0; next }
+    grab && /<string>.*<\/string>/ {
+      s=$0; sub(/.*<string>/,"",s); sub(/<\/string>.*/,"",s); print s
+    }
+  ' "$PLIST"
+}
+
+plist_time() {
+  [ -f "$PLIST" ] || return 0
+  local h m
+  h="$(sed -n 's/.*<key>Hour<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$PLIST")"
+  m="$(sed -n 's/.*<key>Minute<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$PLIST")"
+  printf '%02d:%02d' "${h:-0}" "${m:-0}"
+}
+
+is_loaded() { launchctl print "gui/$UID_/$LABEL" >/dev/null 2>&1; }
+
+reload_agent() {
+  launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
+  if launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null; then
+    launchctl enable "gui/$UID_/$LABEL" 2>/dev/null || true
+    echo "loaded"
+  else
+    echo "not-loaded"
+  fi
+}
+
+cmd_on() {
+  local hour=10 min=0; local folders=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hour) shift; hour="${1:-}" ;;
+      --min)  shift; min="${1:-}" ;;
+      -h|--help) usage; return 0 ;;
+      -*) echo "unknown flag: $1 (see: hiveguard schedule --help)" >&2; return 2 ;;
+      *)  folders+=("$1") ;;
+    esac
+    shift
+  done
+
+  case "$hour" in ''|*[!0-9]*) echo "invalid --hour: '$hour' (0..23)" >&2; return 2 ;; esac
+  case "$min"  in ''|*[!0-9]*) echo "invalid --min: '$min' (0..59)"  >&2; return 2 ;; esac
+  [ "$hour" -ge 0 ] && [ "$hour" -le 23 ] || { echo "invalid --hour: $hour (0..23)" >&2; return 2; }
+  [ "$min"  -ge 0 ] && [ "$min"  -le 59 ] || { echo "invalid --min: $min (0..59)"   >&2; return 2; }
+
+  write_plist "$hour" "$min" "${folders[@]+"${folders[@]}"}"
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$PLIST" >/dev/null || { echo "generated plist failed plutil -lint: $PLIST" >&2; return 1; }
+  fi
+
+  local load; load="$(reload_agent)"
+
+  local at; at="$(printf '%02d:%02d' "$hour" "$min")"
+  local where
+  if [ "${#folders[@]}" -eq 0 ]; then
+    where="your home folder"
+  else
+    where="${folders[*]}"
+  fi
+  echo "✔ Daily OSV scan scheduled at $at — scanning: $where"
+  echo "  If your Mac is asleep or off at $at, the scan runs at the next wake or startup instead."
+  [ "$load" = "loaded" ] || echo "  (agent written but not loaded in this context — it loads on your next login)"
+}
+
+cmd_off() {
+  local had=0
+  launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then rm -f "$PLIST"; had=1; fi
+  if [ "$had" -eq 1 ]; then
+    echo "✔ Daily OSV scan unscheduled (agent removed)."
+  else
+    echo "Nothing scheduled — no daily scan agent to remove."
+  fi
+}
+
+cmd_status() {
+  if [ ! -f "$PLIST" ]; then
+    echo "Daily OSV scan: NOT scheduled."
+    echo "  Schedule it with: hiveguard schedule on [--hour H] [--min M] [folder ...]"
+    return 0
+  fi
+  echo "Daily OSV scan: scheduled at $(plist_time)."
+
+  local fline="" f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    fline="$fline $(xml_unescape "$f")"
+  done < <(plist_folders)
+  if [ -n "$fline" ]; then
+    echo "  Folders:$fline"
+  else
+    echo "  Folders: home folder (default)"
+  fi
+
+  if is_loaded; then echo "  Loaded: yes"; else echo "  Loaded: no (loads on next login)"; fi
+
+  if [ -f "$LOG" ]; then
+    echo "  Last run:"
+    tail -n 1 "$LOG" | sed 's/^/    /'
+  else
+    echo "  Last run: (no runs recorded yet)"
+  fi
+}
+
+case "${1:-status}" in
+  on)     shift; cmd_on "$@" ;;
+  off)    shift; cmd_off ;;
+  status) shift; cmd_status ;;
+  -h|--help|help) usage ;;
+  -*) echo "unknown flag: $1 (see: hiveguard schedule --help)" >&2; exit 2 ;;
+  *)  echo "unknown verb: $1 (use: on | off | status)" >&2; exit 2 ;;
+esac

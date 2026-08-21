@@ -9,6 +9,7 @@
 #   hiveguard ack   <path> [pkg]         # mute a project/finding in the daily report
 #
 # Management:
+#   hiveguard schedule on|off|status   # schedule the daily scan (time + folders)
 #   hiveguard update       # git pull the repo + re-run installer (scripts & agent)
 #   hiveguard version      # installed version (git describe)
 #   hiveguard where        # print the repo path
@@ -53,6 +54,7 @@ case "$cmd" in
   daily) exec "$BIN/osv-daily" "$@" ;;
   brew)  exec "$BIN/brew-changelog" "$@" ;;
   ack)   exec "$BIN/osv-ack" "$@" ;;
+  schedule) exec "$BIN/daily-schedule" "$@" ;;
 
   update)
     echo "🐝 Updating hiveguard ($REPO)"
