@@ -3,17 +3,82 @@
 # One scan -> JSON -> compact HTML report + macOS notification on findings.
 # Also refreshes the bumblebee threat catalog so the install-gate stays current.
 #
-#   osv-daily            # scan ~/Projects
-#   osv-daily <path>     # scan another folder
+#   osv-daily            # interactive: open today's report, else scan
+#   osv-daily <path>     # same, scanning another folder
+#   osv-daily --open     # just open the last report (never scans)
+#   osv-daily --rescan   # force a fresh scan now (never prompts)
+#   osv-daily --if-due   # scan only if today's report is missing/stale
+#   osv-daily -h|--help  # show this help
+#
+# Open-or-rescan: with no flag on an interactive terminal, if today's report
+# already exists it opens and asks whether to rescan; otherwise it scans.
+# Non-interactive runs (launchd, pipes) always scan silently.
 #
 # Acknowledgements: projects/packages muted via `hiveguard ack` (stored in
 # ~/.hiveguard/osv-acks.json) are excluded from the totals and the notification,
 # and shown in a collapsed "Acknowledged" section instead.
 set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-TARGET="${1:-$HOME/Projects}"
+# --- argument parsing ------------------------------------------------------
+print_header() {
+  # print this file's top comment block (what --help shows)
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+}
+usage_err() {
+  echo "usage: osv-daily [--open | --rescan | --if-due] [path]" >&2
+  exit 2
+}
+
+open_flag=0; rescan_flag=0; ifdue_flag=0; TARGET=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) print_header; exit 0 ;;
+    --open)    open_flag=1 ;;
+    --rescan)  rescan_flag=1 ;;
+    --if-due)  ifdue_flag=1 ;;
+    --)        shift; [ $# -gt 0 ] && TARGET="$1"; break ;;
+    -*)        echo "osv-daily: unknown option: $1" >&2; usage_err ;;
+    *)         [ -n "$TARGET" ] && { echo "osv-daily: multiple paths given" >&2; usage_err; }
+               TARGET="$1" ;;
+  esac
+  shift
+done
+if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; }; then
+  echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
+  exit 2
+fi
+TARGET="${TARGET:-$HOME/Projects}"
+
 REPORT="$HOME/.hiveguard/osv-projects.html"
+
+# --- open-or-rescan gate (evaluated before any scan) -----------------------
+report_is_today() { [ -f "$REPORT" ] && [ "$(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; }
+
+if [ "$open_flag" = 1 ]; then
+  if [ -f "$REPORT" ]; then
+    report_is_today || echo "Note: report is from $(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null) and may be stale." >&2
+    open "$REPORT"
+    exit 0
+  fi
+  echo "No report yet at $REPORT — run osv-daily to create one." >&2
+  exit 1
+elif [ "$rescan_flag" = 1 ]; then
+  :   # always scan, never prompt
+elif [ "$ifdue_flag" = 1 ]; then
+  if report_is_today; then exit 0; fi   # fresh → nothing to do, silently
+  # else: scan silently
+elif [ -t 0 ] && [ -t 1 ]; then
+  if report_is_today; then
+    open "$REPORT"
+    printf 'Rescan now? [y/N] ' >&2
+    read -r ans || ans=""
+    case "$ans" in y|Y) : ;; *) exit 0 ;; esac
+  fi
+  # no today's report → scan immediately, no prompt
+fi
+# no flag + non-interactive (launchd, pipe) → fall through and scan silently
+
 ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
 JSON="$(mktemp)"; COUNTS="$(mktemp)"
 trap 'rm -f "$JSON" "$COUNTS"' EXIT
