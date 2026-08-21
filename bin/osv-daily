@@ -51,12 +51,34 @@ fi
 TARGET="${TARGET:-$HOME/Projects}"
 
 REPORT="$HOME/.hiveguard/osv-projects.html"
+STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
 
 # --- open-or-rescan gate (evaluated before any scan) -----------------------
 report_is_today() { [ -f "$REPORT" ] && [ "$(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; }
 
+# print the recovered summary from the last scan's state file (Part B).
+print_last_summary() {
+  STATE="$STATE" REPORT="$REPORT" python3 - <<'PYEOF' || true
+import json, os, sys
+state, report = os.environ["STATE"], os.environ["REPORT"]
+try:
+    with open(state) as f:
+        s = json.load(f)
+    c = s["counts"]; a = c["active"]; k = c["acked"]
+    new = f" · {c['new_vulns']} new" if c.get("new_vulns", 0) > 0 else ""
+    print(f"Last scan: {s['stamp']} ({s['target']})")
+    print(f"  active: {a['projects']} project(s), {a['pkgs']} package(s), "
+          f"{a['vulns']} vuln(s), {a['crit']} critical{new}")
+    print(f"  acknowledged: {k['vulns']} vuln(s) in {k['pkgs']} package(s)")
+    print(f"Report: {report}")
+except Exception:
+    print("Summary unavailable (no state from a previous scan — it will appear after the next scan).")
+PYEOF
+}
+
 if [ "$open_flag" = 1 ]; then
   if [ -f "$REPORT" ]; then
+    print_last_summary   # "I missed the notification" recovery, before opening
     report_is_today || echo "Note: report is from $(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null) and may be stale." >&2
     open "$REPORT"
     exit 0
@@ -70,6 +92,7 @@ elif [ "$ifdue_flag" = 1 ]; then
   # else: scan silently
 elif [ -t 0 ] && [ -t 1 ]; then
   if report_is_today; then
+    print_last_summary   # show the recovered summary before opening + prompting
     open "$REPORT"
     printf 'Rescan now? [y/N] ' >&2
     read -r ans || ans=""
@@ -98,7 +121,7 @@ osv-scanner scan source --recursive --format json "$TARGET" > "$JSON" 2>/dev/nul
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" ACKS="$ACKS" COUNTS="$COUNTS" python3 <<'PYEOF'
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" python3 <<'PYEOF'
 import json, os, html, re, shlex
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
@@ -175,6 +198,36 @@ if cf:
     with open(cf, "w") as f:
         f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
         f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
+
+# --- last-scan state file (baseline for a future diff task) ----------------
+# findings = union of ALL vulnerable findings (active AND acknowledged),
+# collected straight from the raw scan results so ack state doesn't matter.
+sf = os.environ.get("STATE", "")
+if sf:
+    findings = {}
+    for r in d.get("results", []):
+        src = r.get("source", {}).get("path", "")
+        for p in r.get("packages", []):
+            vulns = p.get("vulnerabilities") or []
+            if not vulns: continue
+            name = p.get("package", {}).get("name", "")
+            findings.setdefault(src, {})[name] = [v.get("id", "") for v in vulns]
+    state = {
+        "schema": 1,
+        "stamp": ig("STAMP"),
+        "target": ig("TARGET"),
+        "counts": {
+            "active": {"projects": a_proj, "pkgs": a_pkg, "vulns": a_vuln, "crit": a_crit},
+            "acked":  {"projects": k_proj, "pkgs": k_pkg, "vulns": k_vuln, "crit": k_crit},
+            "new_vulns": 0, "resolved_vulns": 0,
+        },
+        "findings": findings,
+    }
+    os.makedirs(os.path.dirname(sf) or ".", exist_ok=True)
+    tmp = sf + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, sf)
 
 def short(src):
     return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
