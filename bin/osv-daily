@@ -186,6 +186,31 @@ def merge_results(results):
 
 d["results"] = merge_results(d.get("results", []))
 
+# --- baseline for the "new since last scan" diff ---------------------------
+# Read the EXISTING state file BEFORE this run overwrites it at the end. The
+# diff is valid ONLY when a prior scan exists AND it covered the same target
+# set — otherwise an absent/mismatched baseline would mark everything "new".
+prev = None
+try:
+    with open(os.environ.get("STATE", "")) as f:
+        prev = json.load(f)
+except Exception:
+    prev = None
+baseline_findings = (prev or {}).get("findings", {}) or {}
+baseline_target = (prev or {}).get("target")
+baseline_valid = prev is not None and baseline_target is not None and baseline_target == ig("TARGET")
+
+# current union of ALL vulnerable findings (active AND acked), straight from the
+# raw scan results — used both for the state file and the resolved-since diff.
+cur_findings = {}
+for r in d.get("results", []):
+    src = r.get("source", {}).get("path", "")
+    for p in r.get("packages", []):
+        vulns = p.get("vulnerabilities") or []
+        if not vulns: continue
+        name = p.get("package", {}).get("name", "")
+        cur_findings.setdefault(src, {})[name] = [v.get("id", "") for v in vulns]
+
 # --- acknowledgements ------------------------------------------------------
 ack_projects, ack_packages = set(), {}
 try:
@@ -232,6 +257,9 @@ for r in d.get("results", []):
             "fix": max(fixes, key=vtuple) if fixes else "",
             "count": len(vulns), "ids": [v.get("id", "") for v in vulns],
         }
+        # advisory ids not present for this (src, pkg) in the previous scan
+        base_ids = baseline_findings.get(src, {}).get(pkg["name"], []) if baseline_valid else []
+        pkg["new_ids"] = [i for i in pkg["ids"] if i not in base_ids] if baseline_valid else []
         (ack_pkgs if is_acked(src, pkg["name"]) else act_pkgs).append(pkg)
     if act_pkgs:
         act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
@@ -251,26 +279,29 @@ def tally(projlist):
 a_proj, a_pkg, a_vuln, a_crit = tally(active)
 k_proj, k_pkg, k_vuln, k_crit = tally(acked)
 
+# --- new / resolved since last scan (computed only when baseline is valid) --
+# NEW = active finding keys (src, pkg, id) absent from the baseline union.
+# RESOLVED = baseline union keys absent from the current union.
+new_vulns = sum(len(p["new_ids"]) for pr in active for p in pr["pkgs"]) if baseline_valid else 0
+resolved_vulns = 0
+if baseline_valid:
+    cur_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
+    resolved_vulns = sum(1 for s, pk in baseline_findings.items() for n, ids in pk.items()
+                         for i in ids if (s, n, i) not in cur_keys)
+
 # hand the active/acked counts back to the shell (notification + log)
 cf = os.environ.get("COUNTS", "")
 if cf:
     with open(cf, "w") as f:
         f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
         f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
+        f.write(f"NEW_VULNS={new_vulns}\nRESOLVED_VULNS={resolved_vulns}\n")
 
 # --- last-scan state file (baseline for a future diff task) ----------------
 # findings = union of ALL vulnerable findings (active AND acknowledged),
 # collected straight from the raw scan results so ack state doesn't matter.
 sf = os.environ.get("STATE", "")
 if sf:
-    findings = {}
-    for r in d.get("results", []):
-        src = r.get("source", {}).get("path", "")
-        for p in r.get("packages", []):
-            vulns = p.get("vulnerabilities") or []
-            if not vulns: continue
-            name = p.get("package", {}).get("name", "")
-            findings.setdefault(src, {})[name] = [v.get("id", "") for v in vulns]
     state = {
         "schema": 1,
         "stamp": ig("STAMP"),
@@ -278,9 +309,9 @@ if sf:
         "counts": {
             "active": {"projects": a_proj, "pkgs": a_pkg, "vulns": a_vuln, "crit": a_crit},
             "acked":  {"projects": k_proj, "pkgs": k_pkg, "vulns": k_vuln, "crit": k_crit},
-            "new_vulns": 0, "resolved_vulns": 0,
+            "new_vulns": new_vulns, "resolved_vulns": resolved_vulns,
         },
-        "findings": findings,
+        "findings": cur_findings,
     }
     os.makedirs(os.path.dirname(sf) or ".", exist_ok=True)
     tmp = sf + ".tmp"
@@ -297,10 +328,14 @@ def cp_btn(cmd, label):
 
 def pkg_row(p, src, muted):
     cls, lbl = sev_bucket(p["sev"])
+    # NEW badge + accented links apply to active rows only (matches the tile count)
+    new_ids = set(p.get("new_ids") or []) if not muted else set()
     idlinks = " ".join(
-        f'<a href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
+        f'<a class="{"new" if i in new_ids else ""}" '
+        f'href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
         for i in p["ids"][:4])
     more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"]) > 4 else ""
+    badge = f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else ""
     fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
     if muted:
         btn = cp_btn("hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute")
@@ -308,7 +343,7 @@ def pkg_row(p, src, muted):
         btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute")
     return (f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
             f'<td class="mono">{html.escape(p["version"])}</td>'
-            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span></td>'
+            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span>{badge}</td>'
             f'<td class="mono fix">{fix}</td>'
             f'<td class="ids">{idlinks}{more}</td>'
             f'<td class="act">{btn}</td></tr>')
@@ -381,6 +416,8 @@ h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
 .stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 14px;min-width:96px}}
 .stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
 .stat.crit .n{{color:var(--crit)}}
+.stat.new .n{{color:var(--accent)}}
+.newbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--accent);color:#fff;letter-spacing:.02em}}
 details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
 details.proj.acked{{opacity:.72}}
 details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
@@ -411,7 +448,7 @@ tr:last-child td{{border-bottom:none}}
 .sev{{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}}
 .sev.crit{{background:var(--crit-s);color:var(--crit)}}.sev.high{{background:var(--high-s);color:var(--high)}}
 .sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
-.ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.more{{color:var(--faint)}}
+.ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.ids a.new{{font-weight:700;text-decoration:underline;text-underline-offset:2px}}.more{{color:var(--faint)}}
 .clean{{color:var(--low);font-size:16px;margin-top:30px}}
 .ackwrap{{margin-top:30px}}
 .ackwrap>summary{{cursor:pointer;list-style:none;font-family:var(--mono);font-size:13px;color:var(--muted);border-top:1px dashed var(--border-strong);padding-top:16px}}
@@ -430,12 +467,13 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 <div class="stat"><div class="n">{a_pkg}</div><div class="l">packages</div></div>
 <div class="stat"><div class="n">{a_vuln}</div><div class="l">{vuln_l}</div></div>
 <div class="stat crit"><div class="n">{a_crit}</div><div class="l">critical</div></div>
+<div class="stat{' new' if new_vulns > 0 else ''}"><div class="n">{new_vulns}</div><div class="l">new since last scan</div></div>
 </div>
 </header>
 {toolbar}
 {body}
 {acked_html}
-<footer>osv-daily · one scan -> report + notification. Mute an old project with the “mute” button (→ hiveguard ack). Apply fixes yourself: bump the dependency to "Fixed in".</footer>
+<footer>osv-daily · one scan -> report + notification. Mute an old project with the “mute” button (→ hiveguard ack). Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
 </div>
 <script>
 (function(){{
@@ -476,14 +514,19 @@ PYEOF
 # active/acked counts computed by python (notification + log use the ACTIVE ones)
 ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
 ACKED_PROJECTS=0; ACKED_PKGS=0; ACKED_VULNS=0; ACKED_CRIT=0
+NEW_VULNS=0; RESOLVED_VULNS=0
 [ -f "$COUNTS" ] && . "$COUNTS"
 
-echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS) → $REPORT" >> "$LOGDIR/osv-daily.log"
+# "· N new" suffix (notification + done-line) and " new=N" (log), only when > 0
+new_suffix=""; new_log=""
+if [ "${NEW_VULNS:-0}" -gt 0 ]; then new_suffix=" · $NEW_VULNS new"; new_log=" new=$NEW_VULNS"; fi
+
+echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS) → $REPORT" >> "$LOGDIR/osv-daily.log"
 
 # notification only on ACTIVE (non-acknowledged) findings
 if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
   terminal-notifier -title "osv-daily: vulnerabilities found" \
-    -message "$ACTIVE_PROJECTS project(s), $ACTIVE_PKGS package(s), $ACTIVE_VULNS total ($ACTIVE_CRIT critical)" \
+    -message "$ACTIVE_PROJECTS project(s), $ACTIVE_PKGS package(s), $ACTIVE_VULNS total ($ACTIVE_CRIT critical)$new_suffix" \
     -open "file://$REPORT" -sender com.apple.Terminal 2>/dev/null || true
 fi
-echo "✅ done: $ACTIVE_VULNS active vulnerabilities across $ACTIVE_PROJECTS projects ($ACKED_VULNS acknowledged) → $REPORT"
+echo "✅ done: $ACTIVE_VULNS active vulnerabilities across $ACTIVE_PROJECTS projects ($ACKED_VULNS acknowledged)$new_suffix → $REPORT"
