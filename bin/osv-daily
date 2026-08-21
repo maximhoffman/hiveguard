@@ -3,12 +3,17 @@
 # One scan -> JSON -> compact HTML report + macOS notification on findings.
 # Also refreshes the bumblebee threat catalog so the install-gate stays current.
 #
-#   osv-daily            # interactive: open today's report, else scan
-#   osv-daily <path>     # same, scanning another folder
-#   osv-daily --open     # just open the last report (never scans)
-#   osv-daily --rescan   # force a fresh scan now (never prompts)
-#   osv-daily --if-due   # scan only if today's report is missing/stale
-#   osv-daily -h|--help  # show this help
+#   osv-daily              # interactive: open today's report, else scan
+#   osv-daily <path>...    # same, scanning one or more given folders
+#   osv-daily --open       # just open the last report (never scans)
+#   osv-daily --rescan     # force a fresh scan now (never prompts)
+#   osv-daily --if-due     # scan only if today's report is missing/stale
+#   osv-daily -h|--help    # show this help
+#
+# Default target: with no path given, the whole home folder ($HOME) is scanned,
+# with a fixed set of heavyweight/system directories excluded (Library, Caches,
+# node_modules, .git, .cargo, go, …) so the sweep stays fast and quiet. Pass one
+# or more explicit folders to scan those instead.
 #
 # Open-or-rescan: with no flag on an interactive terminal, if today's report
 # already exists it opens and asks whether to rescan; otherwise it scans.
@@ -26,21 +31,20 @@ print_header() {
   awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
 }
 usage_err() {
-  echo "usage: osv-daily [--open | --rescan | --if-due] [path]" >&2
+  echo "usage: osv-daily [--open | --rescan | --if-due] [path...]" >&2
   exit 2
 }
 
-open_flag=0; rescan_flag=0; ifdue_flag=0; TARGET=""
+open_flag=0; rescan_flag=0; ifdue_flag=0; TARGETS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) print_header; exit 0 ;;
     --open)    open_flag=1 ;;
     --rescan)  rescan_flag=1 ;;
     --if-due)  ifdue_flag=1 ;;
-    --)        shift; [ $# -gt 0 ] && TARGET="$1"; break ;;
+    --)        shift; while [ $# -gt 0 ]; do TARGETS+=("$1"); shift; done; break ;;
     -*)        echo "osv-daily: unknown option: $1" >&2; usage_err ;;
-    *)         [ -n "$TARGET" ] && { echo "osv-daily: multiple paths given" >&2; usage_err; }
-               TARGET="$1" ;;
+    *)         TARGETS+=("$1") ;;
   esac
   shift
 done
@@ -48,7 +52,23 @@ if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; };
   echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
   exit 2
 fi
-TARGET="${TARGET:-$HOME/Projects}"
+# Default target = the whole home folder (with exclusions applied at scan time).
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+  TARGETS=("$HOME")
+fi
+# A single, stable, comparable string representing the whole scanned set — used
+# for the report header and the state file's `target` (so a later diff can tell
+# "same target set"). Space-joined; just $HOME when defaulted.
+TARGET_STR="${TARGETS[*]}"
+
+# Directory exclusions always passed to osv-scanner (exact dirname match, via its
+# repeatable --experimental-exclude). A whole-home scan would otherwise crawl
+# huge system/cache trees; these are the non-repo heavyweights. osv-scanner
+# already skips .gitignore'd files, which covers in-repo node_modules etc.
+# Harmless on small/explicit targets (a dirname simply won't be present).
+EXCLUDE_DIRS=(Library Caches .cache .Trash .git node_modules .cargo .rustup .npm go .gradle .m2 Applications)
+EXCLUDE_ARGS=()
+for _d in "${EXCLUDE_DIRS[@]}"; do EXCLUDE_ARGS+=(--experimental-exclude "$_d"); done
 
 REPORT="$HOME/.hiveguard/osv-projects.html"
 STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
@@ -115,17 +135,56 @@ if [ -d "$HOME/bumblebee-src/.git" ]; then
   git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null || true
 fi
 
-# one scan over all projects
-osv-scanner scan source --recursive --format json "$TARGET" > "$JSON" 2>/dev/null || true
+# one scan over all target folders (with the default exclusions applied)
+osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || true
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" python3 <<'PYEOF'
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" python3 <<'PYEOF'
 import json, os, html, re, shlex
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
     return os.environ.get(k, dv)
+
+# --- dedup scan results by source path -------------------------------------
+# osv-scanner can emit the SAME source.path more than once (multiple extractors
+# over one manifest, e.g. a requirements.txt). Left as-is that double-counts
+# projects/packages/vulns everywhere. Merge results by path up front so every
+# tally, finding, and report row below is computed from one entry per path.
+#   - group results by source.path (keep the first result's other source fields)
+#   - within a group, merge packages by package name: union each package's
+#     vulnerabilities deduped by vuln id (keep the first package dict's other
+#     fields); concatenate groups so the later max_severity is the group maximum.
+def merge_results(results):
+    by_path, order = {}, []
+    for r in results:
+        path = (r.get("source", {}) or {}).get("path", "")
+        grp = by_path.get(path)
+        if grp is None:
+            grp = by_path[path] = {"source": dict(r.get("source", {}) or {}),
+                                   "packages": {}, "order": []}
+            order.append(path)
+        for p in r.get("packages", []) or []:
+            name = (p.get("package", {}) or {}).get("name", "")
+            mp = grp["packages"].get(name)
+            if mp is None:
+                mp = dict(p)   # keep this first package dict's other fields
+                mp["vulnerabilities"] = list(p.get("vulnerabilities") or [])
+                mp["groups"] = list(p.get("groups") or [])
+                grp["packages"][name] = mp
+                grp["order"].append(name)
+            else:
+                seen = {v.get("id") for v in mp["vulnerabilities"]}
+                for v in (p.get("vulnerabilities") or []):
+                    if v.get("id") not in seen:
+                        mp["vulnerabilities"].append(v); seen.add(v.get("id"))
+                mp["groups"].extend(p.get("groups") or [])   # max_severity = max
+    return [{"source": by_path[path]["source"],
+             "packages": [by_path[path]["packages"][n] for n in by_path[path]["order"]]}
+            for path in order]
+
+d["results"] = merge_results(d.get("results", []))
 
 # --- acknowledgements ------------------------------------------------------
 ack_projects, ack_packages = set(), {}
