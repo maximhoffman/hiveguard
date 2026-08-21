@@ -20,7 +20,7 @@
 # Full-tree ecosystems: npm, pnpm, yarn, bun, pip, uv.
 # Coarse (top-level package via OSV API): gem, cargo, go, composer.
 set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 FORCE=0; CHECK_ONLY=0; ARGS=()
 for a in "$@"; do
@@ -122,8 +122,25 @@ print_findings_api() {  # coarse
 
 # -- real install (the bumblebee gate turns itself on) -----------------------
 do_install() {
-  # shellcheck disable=SC1090
-  source "$HOME/bin/bumblebee-guard.sh" 2>/dev/null || true
+  # Resolve this script's own real directory (follow symlinks) so we can find
+  # a sibling bumblebee-guard.sh — e.g. under a Homebrew libexec/bin layout,
+  # where there is no ~/bin symlink.
+  local src="$0" self_dir n=0
+  while [ -L "$src" ]; do
+    n=$((n + 1)); [ "$n" -gt 10 ] && break
+    local target; target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$(cd "$(dirname "$src")" && pwd)/$target" ;;
+    esac
+  done
+  self_dir="$(cd "$(dirname "$src")" && pwd)"
+  # shellcheck disable=SC1090,SC1091
+  if [ -f "$self_dir/bumblebee-guard.sh" ]; then
+    source "$self_dir/bumblebee-guard.sh" 2>/dev/null || true
+  elif [ -f "$HOME/bin/bumblebee-guard.sh" ]; then
+    source "$HOME/bin/bumblebee-guard.sh" 2>/dev/null || true
+  fi
   echo "${BLD}→ installing: $MGR $PKG ${EXTRA[*]:-}${NC}"
   case "$MGR" in
     npm)  npm install "$PKG" "${EXTRA[@]}" ;;

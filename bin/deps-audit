@@ -42,7 +42,7 @@ run_osv() {  # $1 = dir
 
 if [ "$SCOPE" = "global" ]; then
   echo "== Global installs =="
-  NPM_G="$(npm root -g 2>/dev/null || echo /opt/homebrew/lib/node_modules)"
+  NPM_G="$(npm root -g 2>/dev/null || echo "$(brew --prefix 2>/dev/null || echo /opt/homebrew)/lib/node_modules")"
   [ -d "$NPM_G" ] && run_osv "$NPM_G"
   UV_TOOLS="$HOME/.local/share/uv/tools"
   [ -d "$UV_TOOLS" ] && run_osv "$UV_TOOLS"
