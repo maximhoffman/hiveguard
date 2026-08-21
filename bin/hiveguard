@@ -59,6 +59,10 @@ case "$cmd" in
   doctor)   exec "$BIN/doctor" "$@" ;;
 
   update)
+    if [ "$(install_method)" = brew ]; then
+      echo "🐝 Updating hiveguard via Homebrew"
+      exec brew upgrade hiveguard
+    fi
     echo "🐝 Updating hiveguard ($REPO)"
     if ! git -C "$REPO" pull --ff-only; then
       echo "⚠ git pull could not fast-forward — resolve it manually in $REPO" >&2; exit 1
