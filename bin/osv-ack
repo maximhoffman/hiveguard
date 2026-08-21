@@ -5,45 +5,100 @@
 # Use it for old projects you don't run: yes, their pinned versions have known
 # issues, but you don't need a fresh alert about them every day.
 #
+# Advisory-scoped mutes (schema v2): a mute records WHICH advisory IDs were known
+# at ack time (snapshotted from the last scan). A future scan can then still
+# alert on a genuinely NEW advisory even inside a muted item — "new pierces the
+# mute". A mute with no scan data yet is open-ended (suppresses everything, the
+# legacy behavior); re-run ack after a scan to scope it to the known advisories.
+#
 #   hiveguard ack <project-path>            # mute a whole project (all its findings)
 #   hiveguard ack <project-path> <package>  # mute one package inside that project
 #   hiveguard ack --list                    # list current acknowledgements
 #   hiveguard ack --remove <path> [package] # un-mute a project, or one of its packages
 #   hiveguard ack --clear                   # drop every acknowledgement
 #
-# State lives in ~/.hiveguard/osv-acks.json. <project-path> is the source path
-# shown in the report (usually the lockfile/manifest path) — the report's copy
-# buttons hand you the exact command, so you rarely type it by hand.
+# Re-running ack on an already-muted entry re-snapshots the current advisories
+# and overwrites the stored set — that's how you "accept" a newly-surfaced
+# advisory (fold it into the mute); no separate verb.
+#
+# State lives in ~/.hiveguard/osv-acks.json (override: HIVEGUARD_ACKS). Advisory
+# IDs are read from the last-scan state file ~/.hiveguard/osv-last-scan.json
+# (override: HIVEGUARD_STATE). <project-path> is the source path shown in the
+# report (usually the lockfile/manifest path) — the report's copy buttons hand
+# you the exact command, so you rarely type it by hand.
 set -euo pipefail
 command -v jq >/dev/null || { echo "jq required (brew install jq)"; exit 1; }
 
 STORE="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
+STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
 mkdir -p "$(dirname "$STORE")"
-[ -f "$STORE" ] || printf '{"projects":[],"packages":{}}\n' > "$STORE"
+[ -f "$STORE" ] || printf '{"schema":2,"projects":{},"packages":{}}\n' > "$STORE"
 # repair an unreadable/empty store rather than failing every command
-jq -e . "$STORE" >/dev/null 2>&1 || printf '{"projects":[],"packages":{}}\n' > "$STORE"
+jq -e . "$STORE" >/dev/null 2>&1 || printf '{"schema":2,"projects":{},"packages":{}}\n' > "$STORE"
+
+# Reads accept BOTH v1 (arrays) and v2 (objects). A v1 entry has no recorded
+# advisory set, so it migrates to ids:null (open-ended = suppresses everything).
+# Every WRITE runs the store through to_v2 first, so old entries survive.
+MIGRATE='def to_v2:
+  if (.schema == 2) then .
+  else {
+    schema: 2,
+    projects: ((.projects // [])
+      | map({key: ., value: {ids: null, since: null}}) | from_entries),
+    packages: ((.packages // {}) | to_entries
+      | map({key: .key,
+             value: (.value | map({key: ., value: {ids: null, since: null}})
+                     | from_entries)})
+      | from_entries)
+  } end;'
 
 usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
 save()  { local tmp; tmp="$(mktemp)"; cat > "$tmp"; mv "$tmp" "$STORE"; }
+today() { date +%Y-%m-%d; }
+
+# Print the advisory IDs known for a (path[,pkg]) from the last-scan state file.
+# Emits compact JSON: an array for a package, an object for a project, or "null"
+# when the state file is missing or has no entry (→ open-ended mute).
+state_pkg()  { jq -c --arg p "$1" --arg k "$2" '.findings[$p][$k] // null' "$STATE" 2>/dev/null || echo null; }
+state_proj() { jq -c --arg p "$1"            '.findings[$p]      // null' "$STATE" 2>/dev/null || echo null; }
 
 case "${1:-}" in
   ""|-h|--help|help)
     usage ;;
 
   -l|--list|list)
-    if [ "$(jq -r '(.projects|length) + ([.packages[]?]|length)' "$STORE")" = "0" ]; then
+    empty="$(jq "$MIGRATE"' to_v2 | ((.projects|length)==0 and (.packages|length)==0)' "$STORE")"
+    if [ "$empty" = "true" ]; then
       echo "No acknowledgements. The report counts everything."
       exit 0
     fi
-    echo "Acknowledged whole projects:"
-    jq -r '.projects[]? | "  • " + .' "$STORE" | { grep . || echo "  (none)"; }
-    echo "Acknowledged packages (per project):"
-    jq -r '.packages | to_entries[]? | "  • \(.key)\n" + (.value | map("      - " + .) | join("\n"))' "$STORE" \
-      | { grep . || echo "  (none)"; }
+    jq -r "$MIGRATE"'
+      to_v2
+      | "Acknowledged whole projects:",
+        ( (.projects | to_entries)
+          | if length == 0 then "  (none)"
+            else .[]
+              | "  • \(.key) — "
+                + (if .value.ids == null then "open-ended"
+                   else "\([.value.ids[]? | length] | add // 0) advisories acknowledged" end)
+                + (if .value.since then " (since \(.value.since))" else "" end)
+            end ),
+        "Acknowledged packages (per project):",
+        ( (.packages | to_entries)
+          | if length == 0 then "  (none)"
+            else .[]
+              | "  • \(.key)",
+                ( .value | to_entries[]
+                  | "      - \(.key) — "
+                    + (if .value.ids == null then "open-ended"
+                       else "\(.value.ids | length) advisories" end)
+                    + (if .value.since then " (since \(.value.since))" else "" end) )
+            end )
+    ' "$STORE"
     ;;
 
   --clear)
-    printf '{"projects":[],"packages":{}}\n' > "$STORE"
+    printf '{"schema":2,"projects":{},"packages":{}}\n' > "$STORE"
     echo "✔ cleared all acknowledgements" ;;
 
   --remove|--rm|-r)
@@ -51,13 +106,15 @@ case "${1:-}" in
     path="${1:-}"; pkg="${2:-}"
     [ -n "$path" ] || { echo "usage: hiveguard ack --remove <path> [package]" >&2; exit 2; }
     if [ -n "$pkg" ]; then
-      jq --arg p "$path" --arg k "$pkg" \
-        '.packages[$p] = ((.packages[$p] // []) - [$k])
-         | (if ((.packages[$p] // []) | length) == 0 then del(.packages[$p]) else . end)' \
-        "$STORE" | save
+      jq "$MIGRATE"'
+        to_v2
+        | .packages[$p] = ((.packages[$p] // {}) | del(.[$k]))
+        | (if (.packages[$p] | length) == 0 then del(.packages[$p]) else . end)' \
+        --arg p "$path" --arg k "$pkg" "$STORE" | save
       echo "✔ un-muted package: $pkg  (in $path)"
     else
-      jq --arg p "$path" '.projects -= [$p] | del(.packages[$p])' "$STORE" | save
+      jq "$MIGRATE"' to_v2 | del(.projects[$p]) | del(.packages[$p])' \
+        --arg p "$path" "$STORE" | save
       echo "✔ un-muted project: $path"
     fi ;;
 
@@ -66,16 +123,32 @@ case "${1:-}" in
 
   *)
     path="$1"; pkg="${2:-}"
+    since="$(today)"
     if [ -n "$pkg" ]; then
-      jq --arg p "$path" --arg k "$pkg" \
-        '.packages[$p] = (((.packages[$p] // []) + [$k]) | unique)' "$STORE" | save
-      echo "✔ muted package: $pkg  (in $path)"
-      echo "  excluded from the report totals and the daily alert."
+      ids="$(state_pkg "$path" "$pkg")"
+      jq "$MIGRATE"' to_v2 | .packages[$p][$k] = {ids: $ids, since: $since}' \
+        --arg p "$path" --arg k "$pkg" --argjson ids "$ids" --arg since "$since" \
+        "$STORE" | save
+      if [ "$ids" = "null" ]; then
+        echo "no scan data for this path yet — muting open-endedly (run 'hiveguard daily' first to scope the mute to known advisories)."
+        echo "✔ muted package: $pkg  (in $path)"
+      else
+        n="$(jq 'length' <<<"$ids")"
+        echo "✔ muted package: $pkg  (in $path) — $n known advisories acknowledged; NEW future advisories will still alert."
+      fi
       echo "  undo: hiveguard ack --remove \"$path\" $pkg"
     else
-      jq --arg p "$path" '.projects = ((.projects + [$p]) | unique)' "$STORE" | save
-      echo "✔ muted project: $path"
-      echo "  all of its findings are excluded from the totals and the daily alert."
+      ids="$(state_proj "$path")"
+      jq "$MIGRATE"' to_v2 | .projects[$p] = {ids: $ids, since: $since}' \
+        --arg p "$path" --argjson ids "$ids" --arg since "$since" \
+        "$STORE" | save
+      if [ "$ids" = "null" ]; then
+        echo "no scan data for this path yet — muting open-endedly (run 'hiveguard daily' first to scope the mute to known advisories)."
+        echo "✔ muted project: $path"
+      else
+        n="$(jq '[.[]? | length] | add // 0' <<<"$ids")"
+        echo "✔ muted project: $path — $n known advisories acknowledged across the project; NEW future advisories will still alert."
+      fi
       echo "  undo: hiveguard ack --remove \"$path\""
     fi ;;
 esac
