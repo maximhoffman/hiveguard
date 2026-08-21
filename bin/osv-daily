@@ -20,8 +20,12 @@
 # Non-interactive runs (launchd, pipes) always scan silently.
 #
 # Acknowledgements: projects/packages muted via `hiveguard ack` (stored in
-# ~/.hiveguard/osv-acks.json) are excluded from the totals and the notification,
-# and shown in a collapsed "Acknowledged" section instead.
+# ~/.hiveguard/osv-acks.json) are excluded from the totals and the notification
+# for the advisories known at ack time, and shown in a collapsed "Acknowledged"
+# section. A genuinely NEW advisory in a muted item still surfaces and alerts
+# ("new pierces the mute"); re-run `hiveguard ack` to fold it in.
+# The scan also writes ~/.hiveguard/osv-last-scan.json (override: HIVEGUARD_STATE)
+# — the last scan's summary and the baseline for the "new since last scan" diff.
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
