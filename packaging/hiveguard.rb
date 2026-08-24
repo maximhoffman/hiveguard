@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Canonical Homebrew formula for hiveguard.
-# The CI workflow (.github/workflows/bump-tap.yml) fills __URL__/__SHA256__ from
+# The CI workflow (.github/workflows/bump-tap.yml) fills the url and sha256 from
 # the pushed tag and publishes the result to the tap repo (maximhoffman/
 # homebrew-hiveguard) as Formula/hiveguard.rb. Do not edit url/sha256 by hand.
 class Hiveguard < Formula
