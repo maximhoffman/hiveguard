@@ -7,3 +7,5 @@ launchd/*.plist
 # tooling scratch (never commit)
 .serena/
 .playwright-mcp/
+# local dev notes for Claude (private)
+CLAUDE.md
