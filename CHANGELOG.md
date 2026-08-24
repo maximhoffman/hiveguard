@@ -15,6 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 ### Changed
 - `hiveguard mark hook` now prints a comment plus a ready-to-run append
   command, not just the bare `source` line.
+- Every subcommand's `--help` is now complete (all verbs/flags documented,
+  with the marking engine's internal verbs labeled as such) and clean — it
+  shows only the command's header, no longer spilling internal mid-file
+  comments.
 
 ## [1.1.0] - 2026-08-24
 

@@ -67,7 +67,7 @@ XATTR_NAME="com.apple.metadata:_kMDItemUserTags"
 
 mkdir -p "$(dirname "$MARKERS")"
 
-usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
 warn()  { echo "folder-mark: warning: $*" >&2; }
 
 # -- resolve this script's real dir + repo root (follow the symlink chain) -----

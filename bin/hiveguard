@@ -85,7 +85,7 @@ case "$cmd" in
     echo "$REPO"
     ;;
   help|-h|--help|"")
-    grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'
+    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
     ;;
   *)
     echo "unknown command: $cmd (see: hiveguard help)" >&2; exit 2 ;;

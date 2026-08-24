@@ -54,7 +54,7 @@ MIGRATE='def to_v2:
       | from_entries)
   } end;'
 
-usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
 save()  { local tmp; tmp="$(mktemp)"; cat > "$tmp"; mv "$tmp" "$STORE"; }
 today() { date +%Y-%m-%d; }
 
