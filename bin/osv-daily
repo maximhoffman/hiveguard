@@ -41,6 +41,16 @@ usage_err() {
   echo "usage: osv-daily [--open | --rescan | --if-due] [path...]" >&2
   exit 2
 }
+# Canonicalize a path (resolve symlinks) — best-effort, prints the input on
+# failure. The terminal hook matches a realpath'd $PWD and folder-mark compares
+# canonical roots against canonical targets, so scan roots/targets MUST be
+# realpath'd or a marker silently won't match.
+canon_path() {
+  local p="$1" c
+  c="$(cd "$p" 2>/dev/null && pwd -P)" && { printf '%s' "$c"; return 0; }
+  python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null \
+    || printf '%s' "$p"
+}
 
 open_flag=0; rescan_flag=0; ifdue_flag=0; TARGETS=()
 while [ $# -gt 0 ]; do
@@ -127,8 +137,8 @@ fi
 # no flag + non-interactive (launchd, pipe) → fall through and scan silently
 
 ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
-JSON="$(mktemp)"; COUNTS="$(mktemp)"
-trap 'rm -f "$JSON" "$COUNTS"' EXIT
+JSON="$(mktemp)"; COUNTS="$(mktemp)"; MARKS="$(mktemp)"
+trap 'rm -f "$JSON" "$COUNTS" "$MARKS"' EXIT
 LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
 STAMP="$(date '+%Y-%m-%d %H:%M')"
 
@@ -147,13 +157,20 @@ if [ "${#TARGETS[@]}" -eq 0 ]; then
   exit 2
 fi
 
+# Canonical (realpath'd) scan targets — used both to bound the per-finding root
+# walk (in python) and as folder-mark's --target set. Newline-joined for python.
+CANON_TARGETS=()
+for _t in "${TARGETS[@]}"; do CANON_TARGETS+=("$(canon_path "$_t")"); done
+SCAN_TARGETS=""
+[ "${#CANON_TARGETS[@]}" -gt 0 ] && SCAN_TARGETS="$(printf '%s\n' "${CANON_TARGETS[@]}")"
+
 # one scan over all target folders (with the default exclusions applied)
 osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || true
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" python3 <<'PYEOF'
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" python3 <<'PYEOF'
 import json, os, html, re, shlex
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
@@ -384,6 +401,75 @@ for r in d.get("results", []):
 active.sort(key=lambda x: x["maxsev"], reverse=True)
 acked.sort(key=lambda x: x["maxsev"], reverse=True)
 
+# --- per-project-root Finder markers (drive folder-mark) -------------------
+# A finding's source path is a manifest (a file). Its project ROOT is the
+# nearest ancestor of the manifest's directory that contains a .git (dir OR
+# file — worktrees), never walking above the scan target the finding is under;
+# with no .git found, the root is the manifest's own directory. Roots are
+# realpath'd (the terminal hook matches a realpath'd $PWD). Findings under one
+# .git (a monorepo) collapse to ONE root. A root that IS itself a scan target is
+# skipped (a stray manifest in a container dir must not tag the whole container).
+scan_targets = [os.path.realpath(t) for t in os.environ.get("SCAN_TARGETS", "").split("\n") if t]
+
+def finding_root(src):
+    d0 = os.path.realpath(os.path.dirname(src))
+    # the scan target containing this finding (longest matching prefix bounds the walk)
+    bound = None
+    for t in scan_targets:
+        if d0 == t or d0.startswith(t + os.sep):
+            if bound is None or len(t) > len(bound):
+                bound = t
+    if bound is None:
+        bound = d0
+    cur = d0
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        if cur == bound:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:            # filesystem root — stop
+            break
+        cur = parent
+    return d0
+
+# aggregate active + acked findings per root: active wins the status, counts sum.
+root_agg = {}   # root -> {"av": active_vulns, "ac": active_crit_pkgs, "kv": acked_vulns, "has_active": bool}
+def _root_entry(root):
+    return root_agg.setdefault(root, {"av": 0, "ac": 0, "kv": 0, "has_active": False})
+for pr in active:
+    root = finding_root(pr["src"])
+    if root in scan_targets:         # skip a root that IS a scan target
+        continue
+    e = _root_entry(root); e["has_active"] = True
+    for p in pr["pkgs"]:
+        e["av"] += p["count"]
+        if p["sev"] >= 9: e["ac"] += 1
+for pr in acked:
+    root = finding_root(pr["src"])
+    if root in scan_targets:
+        continue
+    e = _root_entry(root)
+    for p in pr["pkgs"]:
+        e["kv"] += p["count"]
+
+mark_active = sum(1 for e in root_agg.values() if e["has_active"])
+mark_acked  = len(root_agg) - mark_active
+
+# desired tsv for folder-mark sync: root<TAB>status<TAB>summary
+mf = os.environ.get("MARKS", "")
+if mf:
+    lines = []
+    for root, e in root_agg.items():
+        if e["has_active"]:
+            crit = f" ({e['ac']} critical)" if e["ac"] else ""
+            lines.append(f"{root}\tactive\t{e['av']} active vulnerabilities{crit}")
+        else:
+            lines.append(f"{root}\tacked\t{e['kv']} acknowledged")
+    with open(mf, "w") as f:
+        if lines:
+            f.write("\n".join(lines) + "\n")
+
 def tally(projlist):
     vulns = sum(p["count"] for pr in projlist for p in pr["pkgs"])
     pkgs  = sum(len(pr["pkgs"]) for pr in projlist)
@@ -409,6 +495,7 @@ if cf:
         f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
         f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
         f.write(f"NEW_VULNS={new_vulns}\nRESOLVED_VULNS={resolved_vulns}\n")
+        f.write(f"MARK_ACTIVE={mark_active}\nMARK_ACKED={mark_acked}\n")
 
 # --- last-scan state file (baseline for a future diff task) ----------------
 # findings = union of ALL vulnerable findings (active AND acknowledged),
@@ -639,13 +726,26 @@ PYEOF
 ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
 ACKED_PROJECTS=0; ACKED_PKGS=0; ACKED_VULNS=0; ACKED_CRIT=0
 NEW_VULNS=0; RESOLVED_VULNS=0
+MARK_ACTIVE=0; MARK_ACKED=0
 [ -f "$COUNTS" ] && . "$COUNTS"
+
+# Drive Finder folder markers from this scan. Fully best-effort: it must never
+# fail the scan, the report, or the notification. (Only reached on a real scan —
+# the --open path returns earlier.)
+if [ "${#CANON_TARGETS[@]}" -gt 0 ]; then
+  _mark_args=()
+  for _t in "${CANON_TARGETS[@]}"; do _mark_args+=(--target "$_t"); done
+  "$(dirname "$0")/folder-mark" sync "${_mark_args[@]}" < "$MARKS" 2>/dev/null || true
+fi
 
 # "· N new" suffix (notification + done-line) and " new=N" (log), only when > 0
 new_suffix=""; new_log=""
 if [ "${NEW_VULNS:-0}" -gt 0 ]; then new_suffix=" · $NEW_VULNS new"; new_log=" new=$NEW_VULNS"; fi
 
-echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS) → $REPORT" >> "$LOGDIR/osv-daily.log"
+# marker summary for the log: R=active roots (red tag), Y=acked roots (yellow)
+mark_log=" markers=R${MARK_ACTIVE:-0},Y${MARK_ACKED:-0}"
+
+echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS)$mark_log → $REPORT" >> "$LOGDIR/osv-daily.log"
 
 # notification only on ACTIVE (non-acknowledged) findings
 if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
