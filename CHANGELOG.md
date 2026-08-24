@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-24
+
 ### Added
 - **Folder markers** (`hiveguard mark`): each daily scan marks flagged project
   folders with a Finder tag (red for active vulnerabilities, yellow for
@@ -68,6 +70,7 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/maximhoffman/hiveguard/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/maximhoffman/hiveguard/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/maximhoffman/hiveguard/releases/tag/v1.0.0
