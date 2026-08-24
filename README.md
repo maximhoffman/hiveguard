@@ -41,7 +41,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 |---|---|
 | `hiveguard add <mgr> <pkg>` | Install a package **only after** OSV clears it. Resolves the dependency tree *without installing*, scans it, then installs if clean. Layers on top of bumblebee. |
 | `hiveguard scan [path]` | On-demand scan of a project (or global installs) for known vulnerabilities. Refreshes the bumblebee catalog too. |
-| `hiveguard daily [folder…]` | The scan behind the daily report: one pass over your home folder (or the folders you name) → compact HTML report + macOS notification on findings. Compares against the previous scan to flag what's **new**. |
+| `hiveguard daily <folder>…` | The scan behind the daily report: one pass over the folders you name → compact HTML report + macOS notification on findings. Compares against the previous scan to flag what's **new**. |
 | `hiveguard schedule on\|off\|status` | Schedule the daily scan — you pick the time and folders. Catches up on the next wake/startup if the Mac was asleep. Not automatic; you turn it on. |
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
 | `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you re-ack. Muted items move to a collapsed "Acknowledged" section — never dropped. |
@@ -98,7 +98,7 @@ alerts, `hiveguard brew` changelogs, the install-time gate).
 The daily scan is **not** scheduled automatically. Turn it on when you want it:
 
 ```bash
-hiveguard schedule on            # scan your home folder daily at 10:00
+hiveguard schedule on ~/Projects   # scan ~/Projects daily at 10:00 (name your folders)
 ```
 
 See [Scheduling the daily scan](#scheduling-the-daily-scan) for time and folder options.
@@ -245,14 +245,15 @@ hiveguard scan --no-refresh    # skip refreshing the bumblebee catalog
 ### `hiveguard daily` — the scan behind the report
 
 ```bash
-hiveguard daily                  # scan your home folder → HTML report + notification
-hiveguard daily ~/work ~/code    # scan one or more specific folders instead
+hiveguard daily ~/Projects       # scan one or more folders → HTML report + notification
+hiveguard daily ~/work ~/code    # multiple folders allowed
 ```
 
-With **no folder**, `daily` scans your whole home folder, with a fixed set of
-heavyweight/system directories excluded (`Library`, `Caches`, `node_modules`, `.git`,
-`.cargo`, `go`, …) so the sweep stays fast and quiet. Pass one or more folders to scan
-those instead.
+`daily` needs **at least one folder** — there is no whole-home default. (Scanning the
+whole home folder as a background agent is slow and, on macOS, the OS blocks it from
+reading protected folders like Documents/Desktop, so it silently finds nothing.) A fixed
+set of heavyweight/system directories (`Library`, `Caches`, `node_modules`, `.git`,
+`.cargo`, `go`, …) is excluded so pointing at a large tree stays fast.
 
 Report: `~/.hiveguard/osv-projects.html`. Log: `~/.hiveguard/osv-daily.log`.
 
@@ -291,16 +292,16 @@ Scheduling is a command you run — nothing is scheduled until you turn it on. Y
 **time** and the **folders**:
 
 ```bash
-hiveguard schedule on                      # daily at 10:00, scanning your home folder
-hiveguard schedule on --hour 9 --min 30    # daily at 09:30
-hiveguard schedule on ~/work ~/code        # scan specific folders (multiple allowed)
-hiveguard schedule off                     # unschedule
-hiveguard schedule status                  # time, folders, loaded?, last run
+hiveguard schedule on ~/Projects                        # daily at 10:00, scanning ~/Projects
+hiveguard schedule on --hour 9 --min 30 ~/work ~/code   # 09:30, two folders
+hiveguard schedule off                                  # unschedule
+hiveguard schedule status                               # time, folders, loaded?, last run
 ```
 
-- `on [--hour H] [--min M] [folder …]` — `H` is 0–23, `M` is 0–59 (default 10:00). With
-  no folders, the scan covers your home folder (with the heavyweight/system exclusions
-  above). Multiple folders are allowed. Re-running `on` replaces any existing schedule.
+- `on [--hour H] [--min M] <folder>…` — `H` is 0–23, `M` is 0–59 (default 10:00). **Name
+  at least one folder** — there is no whole-home default (a background home scan is slow
+  and, on macOS, blocked from protected folders). Multiple folders allowed. Re-running
+  `on` replaces any existing schedule.
 - **Catch-up:** if your Mac is **asleep or off** at the scheduled time, the scan runs at
   the next wake or startup instead — so you don't silently skip a day.
 - `off` removes the schedule; safe to run when nothing is scheduled.

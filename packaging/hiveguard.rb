@@ -37,8 +37,8 @@ class Hiveguard < Formula
   def caveats
     <<~EOS
       The daily scan is NOT scheduled automatically. Turn it on — you choose the
-      time and the folders (with no folders it scans your home folder):
-        hiveguard schedule on --hour 10
+      time and name the folders to scan (there is no whole-home default):
+        hiveguard schedule on --hour 10 ~/Projects
 
       Catch-up: if your Mac is asleep or off at the scheduled time, the scan runs
       at the next wake or startup instead.

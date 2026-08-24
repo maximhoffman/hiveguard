@@ -5,12 +5,13 @@
 # com.hiveguard.osv-daily and lives at
 # ~/Library/LaunchAgents/com.hiveguard.osv-daily.plist.
 #
-#   hiveguard schedule on  [--hour H] [--min M] [folder ...]  # (re)schedule
+#   hiveguard schedule on  [--hour H] [--min M] <folder>...   # (re)schedule
 #   hiveguard schedule off                                    # unschedule
 #   hiveguard schedule status                                 # show current (default)
 #
-# on   — H∈0..23, M∈0..59 (default 10:00). With no folders, the scan covers
-#        your home folder (osv-daily's default). The agent runs at the chosen
+# on   — H∈0..23, M∈0..59 (default 10:00). Name at least one folder to scan —
+#        there is no whole-home default (a background home scan is slow and macOS
+#        blocks it from protected folders). The agent runs at the chosen
 #        time AND catches up on boot/login/wake: it is loaded with RunAtLoad and
 #        a calendar interval, and always invokes the scan with --if-due, so a
 #        catch-up run only actually scans when today's report is missing/stale.
@@ -144,6 +145,14 @@ cmd_on() {
   [ "$hour" -ge 0 ] && [ "$hour" -le 23 ] || { echo "invalid --hour: $hour (0..23)" >&2; return 2; }
   [ "$min"  -ge 0 ] && [ "$min"  -le 59 ] || { echo "invalid --min: $min (0..59)"   >&2; return 2; }
 
+  if [ "${#folders[@]}" -eq 0 ]; then
+    echo "hiveguard schedule on: name at least one folder to scan, e.g." >&2
+    echo "  hiveguard schedule on --hour $hour ~/Projects" >&2
+    echo "There is no whole-home default — a background scan of the home folder is" >&2
+    echo "slow and, on macOS, blocked from reading protected folders (finds nothing)." >&2
+    return 2
+  fi
+
   write_plist "$hour" "$min" "${folders[@]+"${folders[@]}"}"
 
   if command -v plutil >/dev/null 2>&1; then
@@ -153,13 +162,7 @@ cmd_on() {
   local load; load="$(reload_agent)"
 
   local at; at="$(printf '%02d:%02d' "$hour" "$min")"
-  local where
-  if [ "${#folders[@]}" -eq 0 ]; then
-    where="your home folder"
-  else
-    where="${folders[*]}"
-  fi
-  echo "✔ Daily OSV scan scheduled at $at — scanning: $where"
+  echo "✔ Daily OSV scan scheduled at $at — scanning: ${folders[*]}"
   echo "  If your Mac is asleep or off at $at, the scan runs at the next wake or startup instead."
   [ "$load" = "loaded" ] || echo "  (agent written but not loaded in this context — it loads on your next login)"
 }

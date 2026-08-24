@@ -10,10 +10,13 @@
 #   osv-daily --if-due     # scan only if today's report is missing/stale
 #   osv-daily -h|--help    # show this help
 #
-# Default target: with no path given, the whole home folder ($HOME) is scanned,
-# with a fixed set of heavyweight/system directories excluded (Library, Caches,
-# node_modules, .git, .cargo, go, …) so the sweep stays fast and quiet. Pass one
-# or more explicit folders to scan those instead.
+# You MUST pass one or more folders to scan — there is no whole-home default.
+# (A background scan of the whole home folder is slow and, on macOS, the OS
+# blocks a background agent from reading protected folders like Documents /
+# Desktop / Downloads, so it silently finds nothing.) Configure the folders once
+# with `hiveguard schedule on --hour H <folder>...`. A fixed set of heavyweight
+# dirs (Library, Caches, node_modules, .git, .cargo, go, …) is excluded at scan
+# time so pointing at a large tree stays fast.
 #
 # Open-or-rescan: with no flag on an interactive terminal, if today's report
 # already exists it opens and asks whether to rescan; otherwise it scans.
@@ -56,14 +59,11 @@ if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; };
   echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
   exit 2
 fi
-# Default target = the whole home folder (with exclusions applied at scan time).
-if [ "${#TARGETS[@]}" -eq 0 ]; then
-  TARGETS=("$HOME")
-fi
 # A single, stable, comparable string representing the whole scanned set — used
 # for the report header and the state file's `target` (so a later diff can tell
-# "same target set"). Space-joined; just $HOME when defaulted.
-TARGET_STR="${TARGETS[*]}"
+# "same target set"). Space-joined; empty until we actually know we're scanning.
+TARGET_STR=""
+[ "${#TARGETS[@]}" -gt 0 ] && TARGET_STR="${TARGETS[*]}"
 
 # Directory exclusions always passed to osv-scanner (exact dirname match, via its
 # repeatable --experimental-exclude). A whole-home scan would otherwise crawl
@@ -137,6 +137,14 @@ command -v osv-scanner >/dev/null || { echo "osv-scanner not found"; exit 1; }
 # bumblebee layer: keep the catalog fresh (install-gate)
 if [ -d "$HOME/bumblebee-src/.git" ]; then
   git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null || true
+fi
+
+# We are about to scan — a folder is required (no whole-home default).
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+  echo "osv-daily: no folder to scan." >&2
+  echo "  Pass one or more folders:   hiveguard daily ~/Projects" >&2
+  echo "  or set up the daily scan:   hiveguard schedule on --hour 10 ~/Projects" >&2
+  exit 2
 fi
 
 # one scan over all target folders (with the default exclusions applied)
