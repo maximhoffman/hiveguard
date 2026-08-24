@@ -137,8 +137,8 @@ fi
 # no flag + non-interactive (launchd, pipe) → fall through and scan silently
 
 ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
-JSON="$(mktemp)"; COUNTS="$(mktemp)"; MARKS="$(mktemp)"
-trap 'rm -f "$JSON" "$COUNTS" "$MARKS"' EXIT
+JSON="$(mktemp)"; COUNTS="$(mktemp)"; MARKS="$(mktemp)"; ERRFILE="$(mktemp)"
+trap 'rm -f "$JSON" "$COUNTS" "$MARKS" "$ERRFILE"' EXIT
 LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
 STAMP="$(date '+%Y-%m-%d %H:%M')"
 
@@ -164,8 +164,49 @@ for _t in "${TARGETS[@]}"; do CANON_TARGETS+=("$(canon_path "$_t")"); done
 SCAN_TARGETS=""
 [ "${#CANON_TARGETS[@]}" -gt 0 ] && SCAN_TARGETS="$(printf '%s\n' "${CANON_TARGETS[@]}")"
 
-# one scan over all target folders (with the default exclusions applied)
-osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || true
+# one scan over all target folders (with the default exclusions applied).
+# In an interactive terminal (stdout AND stderr are both TTYs) show a single,
+# self-overwriting progress line on stderr while osv-scanner walks the tree, and
+# surface a real scanner failure instead of the silent 0 it would otherwise
+# become. Non-interactive runs (launchd, pipes, any redirect) are byte-for-byte
+# identical to before: silent, stderr discarded, exit code swallowed.
+SHOW_PROGRESS=0
+{ [ -t 1 ] && [ -t 2 ]; } && SHOW_PROGRESS=1
+if [ "$SHOW_PROGRESS" = 1 ]; then
+  # Background the scan so we can animate while it runs: stdout->JSON,
+  # stderr->ERRFILE (osv-scanner prints its "Scanned … found N packages" walk
+  # progress on stderr). $SECONDS resets to give whole-second elapsed cheaply.
+  SECONDS=0
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>"$ERRFILE" &
+  _scan_pid=$!
+  _spin='-\|/'; _i=0
+  while kill -0 "$_scan_pid" 2>/dev/null; do
+    _c="${_spin:$((_i % 4)):1}"; _i=$((_i + 1))
+    # Re-parse the stderr log each tick (BSD awk — no gawk match() array):
+    #   N = count of "Scanned " lines, M = sum of the "found N packages" numbers.
+    _mf="$(awk '/^Scanned /{n++} /found [0-9]+ package/{l=$0; sub(/.*found /,"",l); sub(/ package.*/,"",l); p+=l+0} END{printf "%d %d", n, p}' "$ERRFILE" 2>/dev/null)"
+    _n="${_mf%% *}"; _m="${_mf##* }"
+    if [ -n "$_n" ] && [ "$_n" -gt 0 ] 2>/dev/null; then
+      printf '\r\033[K%s scanning %s … %s manifests · %s packages (%ss)' \
+        "$_c" "$TARGET_STR" "$_n" "$_m" "$SECONDS" >&2
+    else
+      # stderr format didn't match (yet / at all) → degrade, never print garbage
+      printf '\r\033[K%s scanning %s … (%ss)' "$_c" "$TARGET_STR" "$SECONDS" >&2
+    fi
+    sleep 0.2
+  done
+  scan_rc=0; wait "$_scan_pid" || scan_rc=$?
+  printf '\r\033[K' >&2   # clear the line — net zero extra lines on a clean run
+  # Surface a genuine failure (exit >1, or no JSON produced) rather than the
+  # silent 0 the non-interactive path yields. Then fall through to the shared
+  # empty-JSON fallback: report + state still get written, osv-daily still 0.
+  if [ "$scan_rc" -gt 1 ] || [ ! -s "$JSON" ]; then
+    echo "⚠ osv-scanner exited with code $scan_rc — report will show 0 results. Last output:" >&2
+    grep -v '^Scanned ' "$ERRFILE" 2>/dev/null | tail -5 >&2 || true
+  fi
+else
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || true
+fi
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
 # compact HTML report. Python owns the counts because it also applies the

@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Interactive scans now show a live progress line (spinner, manifests/packages
+  counted so far, elapsed time) while osv-scanner walks the tree, and surface a
+  real scanner error instead of silently reporting `0` results. Non-interactive
+  runs (launchd, pipes, redirects) are unchanged.
+
 ### Changed
 - `hiveguard mark hook` now prints a comment plus a ready-to-run append
   command, not just the bare `source` line.
