@@ -7,6 +7,7 @@
 #   hiveguard daily [path]               # full scan → HTML report + notification
 #   hiveguard brew  [args]               # changelogs of outdated formulae, pre-upgrade
 #   hiveguard ack   <path> [pkg]         # mute a project/finding in the daily report
+#   hiveguard mark  status|on|off|clear|hook   # Finder tags on flagged folders
 #
 # Management:
 #   hiveguard schedule on|off|status   # schedule the daily scan (time + folders)
@@ -55,6 +56,7 @@ case "$cmd" in
   daily) exec "$BIN/osv-daily" "$@" ;;
   brew)  exec "$BIN/brew-changelog" "$@" ;;
   ack)   exec "$BIN/osv-ack" "$@" ;;
+  mark)  exec "$BIN/folder-mark" "$@" ;;
   schedule) exec "$BIN/daily-schedule" "$@" ;;
   doctor)   exec "$BIN/doctor" "$@" ;;
 
