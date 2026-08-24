@@ -6,6 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Folder markers** (`hiveguard mark`): each daily scan marks flagged project
+  folders with a Finder tag (red for active vulnerabilities, yellow for
+  acknowledged-but-still-present, cleared once a project is clean), plus an
+  opt-in terminal reminder that warns when you `cd` into a flagged project.
+  `hiveguard mark status|on|off|clear|hook` manages it; `mark clear` removes
+  everything hiveguard placed (run it before uninstalling).
+
 ### Changed
 - Release notes are now generated automatically from this changelog on each
   version tag (a GitHub Release is created by CI).

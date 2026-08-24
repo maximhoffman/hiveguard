@@ -43,9 +43,11 @@ class Hiveguard < Formula
       Catch-up: if your Mac is asleep or off at the scheduled time, the scan runs
       at the next wake or startup instead.
 
-      Before `brew uninstall hiveguard`, run `hiveguard schedule off` — the
-      launchd agent is not managed by brew services and would otherwise survive.
-      `hiveguard doctor` flags this (and other install issues).
+      Before `brew uninstall hiveguard`, run `hiveguard schedule off` and
+      `hiveguard mark clear` — the launchd agent is not managed by brew services,
+      and the Finder tags/state hiveguard placed on flagged folders would
+      otherwise survive too. `hiveguard doctor` flags this (and other install
+      issues).
 
       Migrating from the git install? Run:
         hiveguard doctor --fix
@@ -59,6 +61,9 @@ class Hiveguard < Formula
       Install-time gating (bumblebee) is a separate upstream tool. To enable the
       shell guard, add to ~/.zshrc:
         source "#{opt_libexec}/bin/bumblebee-guard.sh"
+
+      Want a terminal reminder when you cd into a project hiveguard flagged?
+      Add the line `hiveguard mark hook` prints to ~/.zshrc the same way.
     EOS
   end
 

@@ -45,6 +45,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `hiveguard schedule on\|off\|status` | Schedule the daily scan — you pick the time and folders. Catches up on the next wake/startup if the Mac was asleep. Not automatic; you turn it on. |
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
 | `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you re-ack. Muted items move to a collapsed "Acknowledged" section — never dropped. |
+| `hiveguard mark status\|on\|off\|clear\|hook` | Mark flagged project folders (Finder tag + terminal reminder). `off`/`clear` opt out; `hook` prints the line to add to `~/.zshrc`. |
 | `hiveguard doctor [--fix]` | Diagnose install/migration health (install method, PATH shadowing, obsolete `~/bin` links, the launchd agent, the shell guard, prerequisites). `--fix` applies only safe, reversible repairs. |
 | `hiveguard update` | Self-update: `brew upgrade` under a brew install, or `git pull` + re-run the installer from a source checkout. |
 
@@ -360,6 +361,42 @@ command for that project or package — click, paste, run. Acknowledgements pers
 When everything active is acknowledged, the report shows zero and the daily notification
 stays quiet (until a new advisory pierces a mute). The `<path>` is the source path
 (lockfile/manifest) shown on each project row.
+
+### Folder markers
+
+Once the daily scan is running over your folders (see
+[Scheduling](#scheduling-the-daily-scan)), each scan marks every flagged project
+**folder** with its status — there's no marker file, just two surfaces:
+
+- **Finder tags** (automatic) — a red `hiveguard-alert` tag on a project with active
+  (unacknowledged) vulnerabilities, a yellow `hiveguard-acked` tag on one whose
+  vulnerabilities are all muted via `hiveguard ack` but still present, and the tag is
+  removed once the project is clean. Your own Finder tags are never touched, so opening
+  a project weeks later in Finder still shows its status at a glance.
+- **Terminal reminder** (opt-in) — a zsh hook that prints a one-line warning when you
+  `cd` into a flagged project, so you notice *before* you run anything. Enable it by
+  adding the line `hiveguard mark hook` prints to your `~/.zshrc` — hiveguard never
+  edits your shell config for you:
+
+  ```bash
+  hiveguard mark hook   # prints: source /path/to/hiveguard-hook.zsh
+  # paste the printed line into ~/.zshrc, then open a new terminal
+  ```
+
+```bash
+hiveguard mark status   # Finder marking on/off, hook sourced?, currently marked roots
+hiveguard mark on       # (re)enable the Finder tag surface
+hiveguard mark off      # disable Finder tags — also clears existing tags now;
+                         # the terminal hook keeps working off the same state
+hiveguard mark clear    # remove EVERYTHING hiveguard placed (tags + state) —
+                         # run this before `brew uninstall` / removing hiveguard
+```
+
+Markers refresh on the **next scan**, not instantly — e.g. after `hiveguard ack`, the
+red→yellow flip on a project's Finder tag appears the next time `hiveguard daily` (or
+the scheduled agent) runs, not the moment you ack. Markers only ever appear for projects
+the daily scan actually covers, so this feature is only useful once you've set up
+`hiveguard schedule on <folders>` (or run `hiveguard daily <folders>` yourself).
 
 ### `hiveguard brew` — read before you upgrade
 
