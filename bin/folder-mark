@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# folder-mark — mark project FOLDERS with their security status using macOS
+# Finder tags, and maintain a small state file that a terminal hook also reads.
+#
+# There is NO marker file: the visible signal is a Finder tag on the folder
+# (red "hiveguard-alert" for active vulnerabilities, yellow "hiveguard-acked"
+# for acknowledged ones). Alongside the tag we keep a tab-separated state file
+# so other tools (e.g. a shell prompt hook) can see a folder's status without
+# reading extended attributes.
+#
+#   folder-mark apply <root> <active|acked> [summary]   set tag + record state
+#   folder-mark clear <root>                            remove tag + drop state
+#   folder-mark sync --target <dir> [--target <dir> …]  reconcile from stdin tsv
+#   folder-mark _status-raw                             print the state tsv
+#
+# apply: upserts the state row and (when Finder marking is on) sets exactly one
+#   hiveguard-* tag on <root>, without disturbing the user's own tags. With
+#   mark_finder off it still records the row but sets no tag.
+# clear: removes any hiveguard-* tag from <root> and deletes its state row.
+# sync: reads a DESIRED tsv from stdin (same row format). Every root in
+#   (current ∪ desired) that is equal-to-or-under one of the --target dirs is
+#   made to match desired (applied, or cleared when absent from desired). Rows
+#   whose root is not under any target are preserved untouched. The merged state
+#   file is then written atomically. Tag writes are read-compare-write, so a tag
+#   that is already correct is left alone (no mtime churn).
+#
+# State file: HIVEGUARD_MARKERS (default ~/.hiveguard/osv-markers.tsv). Rows are
+#   root<TAB>status<TAB>summary, status ∈ active|acked.
+# Config file: HIVEGUARD_CONFIG (default ~/.hiveguard/config), key=value lines.
+#   mark_finder=0 turns Finder tagging off; absent/anything-else means on.
+#
+# Tags live in the xattr com.apple.metadata:_kMDItemUserTags — a binary-plist
+# array of "TagName\nColorNumber" strings (red=6, yellow=5). Tag I/O uses the
+# stock `xattr` tool; python3/plistlib only transforms the binary plist. All of
+# it is best-effort: a missing/unreadable/unwritable path or an unparseable tag
+# array logs a warning to stderr and continues (never aborts).
+set -euo pipefail
+
+MARKERS="${HIVEGUARD_MARKERS:-$HOME/.hiveguard/osv-markers.tsv}"
+CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
+XATTR_NAME="com.apple.metadata:_kMDItemUserTags"
+
+mkdir -p "$(dirname "$MARKERS")"
+
+usage() { grep '^#' "$0" | grep -v '/usr/bin/env' | sed 's/^# \{0,1\}//'; }
+warn()  { echo "folder-mark: warning: $*" >&2; }
+
+# --- config ------------------------------------------------------------------
+# Read a key=value from the config file; print $2 when the key is absent/empty.
+config_get() {
+  local key="$1" def="$2" val=""
+  if [ -f "$CONFIG" ]; then
+    val="$(awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");v=$0} END{print v}' \
+           "$CONFIG" 2>/dev/null || true)"
+  fi
+  if [ -n "$val" ]; then printf '%s' "$val"; else printf '%s' "$def"; fi
+}
+# Finder marking is on unless mark_finder is explicitly 0.
+mark_finder_on() { [ "$(config_get mark_finder 1)" != "0" ]; }
+
+# --- state file (tsv) --------------------------------------------------------
+tsv_upsert() {  # root status summary — atomic replace of that root's row
+  local root="$1" status="$2" summary="$3" tmp
+  tmp="$(mktemp)"
+  [ -f "$MARKERS" ] && awk -F'\t' -v r="$root" '$1!=r' "$MARKERS" > "$tmp" || true
+  printf '%s\t%s\t%s\n' "$root" "$status" "$summary" >> "$tmp"
+  mv "$tmp" "$MARKERS"
+}
+tsv_delete() {  # root — atomic removal of that root's row
+  local root="$1" tmp
+  [ -f "$MARKERS" ] || return 0
+  tmp="$(mktemp)"
+  awk -F'\t' -v r="$root" '$1!=r' "$MARKERS" > "$tmp" || true
+  mv "$tmp" "$MARKERS"
+}
+
+# --- Finder tags -------------------------------------------------------------
+# python3/plistlib is used ONLY to transform the tag array: macOS lacks
+# os.*xattr, so bash owns the actual reads/writes via the `xattr` tool. The
+# helper takes the current tags as HEX in argv and prints one action word:
+#   NOCHANGE  — already correct, do nothing (avoids mtime churn)
+#   SKIP      — could not parse; leave the folder's tags untouched
+#   REMOVE    — the array is now empty, delete the xattr
+#   WRITE <hex> — write this binary-plist array back
+_tag_reconcile() {  # root mode(set|clear) [name] [color]
+  local root="$1" mode="$2" name="${3:-}" color="${4:-}" curhex out hex
+  command -v python3 >/dev/null 2>&1 || {
+    warn "python3 not found; skipping Finder tag on $root"; return 0; }
+
+  # Current tags as continuous hex ("" when the xattr is absent/unreadable).
+  curhex="$(xattr -p -x "$XATTR_NAME" "$root" 2>/dev/null | tr -d '[:space:]' || true)"
+
+  if ! out="$(python3 - "$mode" "$name" "$color" "$curhex" <<'PY'
+import sys, binascii, plistlib
+
+PREFIX = "hiveguard-"
+def warn(m): sys.stderr.write("folder-mark: warning: %s\n" % m)
+
+mode  = sys.argv[1]
+name  = sys.argv[2] if len(sys.argv) > 2 else ""
+color = sys.argv[3] if len(sys.argv) > 3 else ""
+hexd  = sys.argv[4] if len(sys.argv) > 4 else ""
+
+tags = []
+if hexd:
+    try:
+        val = plistlib.loads(binascii.unhexlify(hexd))
+    except Exception:
+        warn("cannot parse existing tags; leaving untouched"); print("SKIP"); sys.exit(0)
+    if isinstance(val, list) and all(isinstance(x, str) for x in val):
+        tags = val
+    else:
+        warn("unexpected tag format; leaving untouched"); print("SKIP"); sys.exit(0)
+
+tname = lambda t: t.split("\n", 1)[0]
+kept  = [t for t in tags if not tname(t).startswith(PREFIX)]
+hg    = [t for t in tags if     tname(t).startswith(PREFIX)]
+
+if mode == "set":
+    want = "%s\n%s" % (name, color)
+    if hg == [want]:
+        print("NOCHANGE"); sys.exit(0)
+    desired = kept + [want]
+elif mode == "clear":
+    if not hg:
+        print("NOCHANGE"); sys.exit(0)
+    desired = kept
+else:
+    warn("internal: unknown mode %r" % mode); print("SKIP"); sys.exit(0)
+
+if not desired:
+    print("REMOVE"); sys.exit(0)
+
+blob = plistlib.dumps(desired, fmt=plistlib.FMT_BINARY)
+print("WRITE " + binascii.hexlify(blob).decode())
+PY
+  )"; then
+    # python itself failed (already warned, or crashed); never abort.
+    out="SKIP"
+  fi
+
+  case "$out" in
+    NOCHANGE|SKIP|"") : ;;
+    REMOVE)
+      xattr -d "$XATTR_NAME" "$root" 2>/dev/null \
+        || warn "could not remove tag on $root" ;;
+    "WRITE "*)
+      hex="${out#WRITE }"
+      xattr -w -x "$XATTR_NAME" "$hex" "$root" 2>/dev/null \
+        || warn "could not write tag on $root" ;;
+    *) warn "unexpected tag helper output for $root" ;;
+  esac
+  return 0
+}
+
+set_tag_for_status() {  # root status — map status → hiveguard tag + color
+  case "$2" in
+    active) _tag_reconcile "$1" set hiveguard-alert 6 ;;
+    acked)  _tag_reconcile "$1" set hiveguard-acked 5 ;;
+    *) warn "unknown status '$2' for $1" ;;
+  esac
+}
+clear_tag() { _tag_reconcile "$1" clear; }
+
+# --- verbs -------------------------------------------------------------------
+case "${1:-}" in
+  ""|-h|--help|help)
+    usage ;;
+
+  apply)
+    root="${2:-}"; status="${3:-}"; summary="${4:-}"
+    [ -n "$root" ] || { echo "usage: folder-mark apply <root> <active|acked> [summary]" >&2; exit 2; }
+    case "$status" in
+      active|acked) : ;;
+      *) echo "folder-mark apply: status must be 'active' or 'acked'" >&2; exit 2 ;;
+    esac
+    if mark_finder_on; then
+      set_tag_for_status "$root" "$status"
+    fi
+    tsv_upsert "$root" "$status" "$summary" ;;
+
+  clear)
+    root="${2:-}"
+    [ -n "$root" ] || { echo "usage: folder-mark clear <root>" >&2; exit 2; }
+    clear_tag "$root"
+    tsv_delete "$root" ;;
+
+  sync)
+    shift
+    targets=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --target)
+          shift
+          [ -n "${1:-}" ] || { echo "folder-mark sync: --target needs a <dir>" >&2; exit 2; }
+          targets+=("$1"); shift ;;
+        *) echo "folder-mark sync: unexpected argument: $1" >&2; exit 2 ;;
+      esac
+    done
+    [ "${#targets[@]}" -gt 0 ] || { echo "folder-mark sync: at least one --target <dir> is required" >&2; exit 2; }
+
+    # root is under a target when it equals it or sits beneath it.
+    under_target() {
+      local root="$1" t
+      for t in "${targets[@]}"; do
+        [ "$root" = "$t" ] && return 0
+        [ "${root#"$t"/}" != "$root" ] && return 0
+      done
+      return 1
+    }
+
+    des="$(mktemp)"; cat > "$des"          # DESIRED tsv from stdin
+    merged="$(mktemp)"
+    finder_on=0; mark_finder_on && finder_on=1
+
+    # union of roots across the current state file and the desired input
+    roots="$( { [ -f "$MARKERS" ] && cut -f1 "$MARKERS"; cut -f1 "$des"; } | sort -u )"
+
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      if under_target "$root"; then
+        dline="$(awk -F'\t' -v r="$root" '$1==r{print; exit}' "$des")"
+        if [ -n "$dline" ]; then
+          status="$(printf '%s' "$dline" | cut -f2)"
+          summary="$(printf '%s' "$dline" | cut -f3-)"
+          [ "$finder_on" = 1 ] && set_tag_for_status "$root" "$status"
+          printf '%s\t%s\t%s\n' "$root" "$status" "$summary" >> "$merged"
+        else
+          clear_tag "$root"          # in scope but not desired → clear tag + drop row
+        fi
+      else
+        # out of scope → preserve the existing row verbatim, touch no tag
+        oline="$(awk -F'\t' -v r="$root" '$1==r{print; exit}' "$MARKERS" 2>/dev/null || true)"
+        [ -n "$oline" ] && printf '%s\n' "$oline" >> "$merged"
+      fi
+    done <<EOF
+$roots
+EOF
+
+    mv "$merged" "$MARKERS"
+    rm -f "$des" ;;
+
+  _status-raw)
+    [ -f "$MARKERS" ] && cat "$MARKERS" || true ;;
+
+  *)
+    echo "unknown verb: $1 (see: folder-mark --help)" >&2; exit 2 ;;
+esac
