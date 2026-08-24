@@ -270,7 +270,57 @@ else
   fi
 fi
 
-# ── 6. prerequisites ────────────────────────────────────────────────────────
+# ── 6. folder markers ───────────────────────────────────────────────────────
+sec "Folder markers"
+MARKERS="${HIVEGUARD_MARKERS:-$HOME/.hiveguard/osv-markers.tsv}"
+MCONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
+mark_finder_on() {
+  local val=""
+  [ -f "$MCONFIG" ] && val="$(awk -F= '$1=="mark_finder"{sub(/^[^=]*=/,"");v=$0} END{print v}' "$MCONFIG" 2>/dev/null || true)"
+  [ "$val" != "0" ]
+}
+if mark_finder_on; then
+  ok "Finder marking: on"
+else
+  warn "Finder marking: off (flagged folders won't get a Finder tag)"
+fi
+
+hook_line="$(grep -n 'hiveguard-hook\.zsh' "$ZSHRC" 2>/dev/null | head -n1 || true)"
+if [ -z "$hook_line" ]; then
+  warn "terminal hook not sourced in ~/.zshrc — no cd reminders on flagged folders"
+  remedy "run: hiveguard mark hook   (then add the printed line to ~/.zshrc)"
+else
+  hp="$(printf '%s' "$hook_line" | sed -n 's/.*source[[:space:]]*["'\'']\{0,1\}\([^"'\'' ]*hiveguard-hook\.zsh\).*/\1/p' | head -n1 || true)"
+  hp_expanded="${hp/#\$HOME/$HOME}"; hp_expanded="${hp_expanded/#\~/$HOME}"
+  if [ -n "$hp_expanded" ] && [ ! -e "$hp_expanded" ]; then
+    bad "~/.zshrc sources $hp, which no longer exists"
+    remedy "run: hiveguard mark hook   (then update the source line in ~/.zshrc)"
+  else
+    ok "terminal hook sourced in ~/.zshrc${hp:+ ($hp)}"
+  fi
+fi
+
+if [ -f "$MARKERS" ]; then
+  bad_rows=0; roots=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    fields="$(awk -F'\t' '{print NF}' <<<"$line")"
+    if [ "$fields" -lt 2 ]; then
+      bad_rows=$((bad_rows + 1))
+    else
+      roots=$((roots + 1))
+    fi
+  done < "$MARKERS"
+  if [ "$bad_rows" -gt 0 ]; then
+    warn "state file has $bad_rows malformed row(s) in $MARKERS"
+  else
+    ok "state file OK — $roots root(s) marked"
+  fi
+else
+  ok "state file OK — 0 roots marked (no $MARKERS yet)"
+fi
+
+# ── 7. prerequisites ────────────────────────────────────────────────────────
 sec "Prerequisites"
 req() { command -v "$1" >/dev/null 2>&1 && ok "$1 (required)" || { bad "$1 missing (required)"; remedy "$2"; }; }
 opt() { command -v "$1" >/dev/null 2>&1 && ok "$1 (optional)" || { warn "$1 missing (optional)"; remedy "$2"; }; }
