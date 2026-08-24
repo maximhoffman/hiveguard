@@ -290,7 +290,13 @@ case "${1:-}" in
     echo "✔ Finder marking off; existing Finder tags cleared (state kept)." ;;
 
   hook)
-    echo "source $(hook_script_path)" ;;
+    hp="$(hook_script_path)"
+    echo "# hiveguard: warn on 'cd' into a project flagged with vulnerabilities."
+    echo "# Add this line to ~/.zshrc, then open a new terminal:"
+    echo "source \"$hp\""
+    echo
+    echo "# …or append it now:"
+    echo "echo 'source \"$hp\"' >> ~/.zshrc" ;;
 
   sync)
     shift

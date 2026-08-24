@@ -6,6 +6,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `hiveguard mark hook` now prints a comment plus a ready-to-run append
+  command, not just the bare `source` line.
+
 ## [1.1.0] - 2026-08-24
 
 ### Added
