@@ -53,3 +53,32 @@ jobs:
           git add Formula/hiveguard.rb
           git commit -m "hiveguard ${GITHUB_REF_NAME#v}" || { echo "no formula change"; exit 0; }
           git push
+
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out hiveguard
+        uses: actions/checkout@v4
+
+      - name: Create the GitHub Release from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"; ver="${tag#v}"
+          # Pull this version's section out of CHANGELOG.md (## [x.y.z] … up to
+          # the next version heading or the link-reference block).
+          notes="$(awk -v v="$ver" '
+            index($0, "## [" v "]") == 1 { grab=1; next }
+            grab && (/^## \[/ || /^\[[^]]+\]:/) { exit }
+            grab { print }
+          ' CHANGELOG.md)"
+          if printf '%s' "$notes" | grep -q '[^[:space:]]'; then
+            printf '%s\n' "$notes" > /tmp/notes.md
+            gh release create "$tag" --title "$tag" --notes-file /tmp/notes.md --verify-tag
+          else
+            # No changelog section — fall back to GitHub's auto-generated notes.
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          fi

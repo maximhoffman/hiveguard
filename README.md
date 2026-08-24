@@ -153,6 +153,10 @@ hiveguard update
 You can also run the native update directly — `brew upgrade hiveguard` under brew, or
 `cd /path/to/hiveguard && git pull && ./install.sh` from a clone.
 
+What changed between versions lives in [`CHANGELOG.md`](CHANGELOG.md) and on the
+[Releases](https://github.com/maximhoffman/hiveguard/releases) page (Homebrew itself
+doesn't show a changelog on upgrade).
+
 A changed report layout shows up on the **next scan** — wait for the daily run, or
 trigger one now:
 
