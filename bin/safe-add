@@ -15,7 +15,12 @@
 #   safe-add uv   serena-agent           # uv tool install
 #   safe-add gem  nokogiri               # coarse check (name only, no tree)
 #   safe-add cargo ripgrep
-#   Flags: --force (install despite critical), --check-only (scan only)
+#   Flags:
+#     --force        install anyway despite a critical/MAL verdict — use once
+#                    you've reviewed the findings and accept the risk
+#     --check-only   run the OSV check and print the verdict, but skip the
+#                    install — use to preview risk before deciding
+#     -h, --help     show this help
 #
 # Full-tree ecosystems: npm, pnpm, yarn, bun, pip, uv.
 # Coarse (top-level package via OSV API): gem, cargo, go, composer.

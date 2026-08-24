@@ -8,28 +8,32 @@
 # so other tools (e.g. a shell prompt hook) can see a folder's status without
 # reading extended attributes.
 #
+# Internal — the scan engine's verbs (osv-daily/folder-mark call these; you
+# rarely type them by hand):
 #   folder-mark apply <root> <active|acked> [summary]   set tag + record state
-#   folder-mark clear [root]                            remove tag(s) + drop state
 #   folder-mark sync --target <dir> [--target <dir> …]  reconcile from stdin tsv
-#   folder-mark _status-raw                             print the state tsv
+#   folder-mark _status-raw                             internal/debug: dump
+#                                                        the raw state tsv, no
+#                                                        formatting
 #
+# Everyday — the verbs you run by hand:
 #   folder-mark status                 Finder marking + hook + marked roots
 #   folder-mark on / off               toggle Finder tagging (off also clears
 #                                       tags now; the state rows are kept)
-#   folder-mark clear                  clear EVERY hiveguard tag + empty state
-#                                       (pre-uninstall step; `clear <root>`
-#                                       still clears just that one root)
+#   folder-mark clear [root]           clear tag(s) + drop state; with no root,
+#                                       clears EVERY hiveguard tag (pre-uninstall
+#                                       step); with a root, clears just that one
 #   folder-mark hook                   print the `source …` line for ~/.zshrc
 #
-# apply: upserts the state row and (when Finder marking is on) sets exactly one
-#   hiveguard-* tag on <root>, without disturbing the user's own tags. With
-#   mark_finder off it still records the row but sets no tag.
+# apply (internal): upserts the state row and (when Finder marking is on) sets
+#   exactly one hiveguard-* tag on <root>, without disturbing the user's own
+#   tags. With mark_finder off it still records the row but sets no tag.
 # clear <root>: removes any hiveguard-* tag from <root> and deletes its state row.
 # clear (no root): removes hiveguard-* tags from every root in the state file
 #   and empties the state file — everything hiveguard ever placed, gone. Use
 #   this before uninstalling.
-# sync: reads a DESIRED tsv from stdin (same row format). Every root in
-#   (current ∪ desired) that is equal-to-or-under one of the --target dirs is
+# sync (internal): reads a DESIRED tsv from stdin (same row format). Every root
+#   in (current ∪ desired) that is equal-to-or-under one of the --target dirs is
 #   made to match desired (applied, or cleared when absent from desired). Rows
 #   whose root is not under any target are preserved untouched. The merged state
 #   file is then written atomically. Tag writes are read-compare-write, so a tag
@@ -41,6 +45,9 @@
 # hook: prints (never runs) the line to add to ~/.zshrc to enable the terminal
 #   reminder hook, resolving the hook script's path for this install (brew vs.
 #   git checkout).
+# _status-raw (internal/debug): prints the state tsv as-is (root<TAB>status
+#   <TAB>summary per line) for scripts/debugging; `status` is the human-readable
+#   version of the same data.
 #
 # State file: HIVEGUARD_MARKERS (default ~/.hiveguard/osv-markers.tsv). Rows are
 #   root<TAB>status<TAB>summary, status ∈ active|acked.

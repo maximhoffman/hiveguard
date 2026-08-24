@@ -13,9 +13,11 @@
 #
 #   hiveguard ack <project-path>            # mute a whole project (all its findings)
 #   hiveguard ack <project-path> <package>  # mute one package inside that project
-#   hiveguard ack --list                    # list current acknowledgements
+#   hiveguard ack --list                    # list current acknowledgements (aliases: -l, list)
 #   hiveguard ack --remove <path> [package] # un-mute a project, or one of its packages
+#                                            # (aliases: --rm, -r)
 #   hiveguard ack --clear                   # drop every acknowledgement
+#   hiveguard ack -h|--help|help            # show this help
 #
 # Re-running ack on an already-muted entry re-snapshots the current advisories
 # and overwrites the stored set — that's how you "accept" a newly-surfaced
