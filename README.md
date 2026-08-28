@@ -373,10 +373,15 @@ Once the daily scan is running over your folders (see
   vulnerabilities are all muted via `hiveguard ack` but still present, and the tag is
   removed once the project is clean. Your own Finder tags are never touched, so opening
   a project weeks later in Finder still shows its status at a glance.
+
+  ![A flagged project folder in Finder carrying a red hiveguard-alert tag](docs/screenshots/markers-finder.png)
+
 - **Terminal reminder** (opt-in) — a zsh hook that prints a one-line warning when you
   `cd` into a flagged project, so you notice *before* you run anything. Enable it by
   adding the line `hiveguard mark hook` prints to your `~/.zshrc` — hiveguard never
   edits your shell config for you:
+
+  ![Terminal reminder: cd into a flagged project prints a red hiveguard warning with the vulnerability count](docs/screenshots/markers-terminal.png)
 
   ```bash
   hiveguard mark hook   # prints: source /path/to/hiveguard-hook.zsh
