@@ -434,6 +434,7 @@ description, its changelog for the version range, and a copy-ready `brew upgrade
 ```bash
 hiveguard doctor          # read-only health check (exits non-zero on any ✖)
 hiveguard doctor --fix    # also apply safe, reversible repairs
+hiveguard doctor --quiet  # print a single verdict word: fail|warn|ok
 ```
 
 `doctor` diagnoses install and migration health: how hiveguard was installed and its

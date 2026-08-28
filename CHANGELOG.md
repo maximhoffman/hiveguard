@@ -6,6 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Pretty, structured `hiveguard help` output on a terminal (bold title, bold
+  section headings, aligned descriptions), with an at-a-glance health line
+  (✓/⚠/✖) at the bottom that points to `hiveguard doctor` for detail. Piped
+  output is unchanged.
+- `doctor --quiet` — prints a single health verdict word (fail|warn|ok), used
+  by the help health line and handy for scripts.
+
 ## [1.2.0] - 2026-08-28
 
 ### Added
