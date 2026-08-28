@@ -6,11 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-28
+
 ### Added
 - Pretty, structured `hiveguard help` output on a terminal (bold title, bold
   section headings, aligned descriptions), with an at-a-glance health line
-  (✓/⚠/✖) at the bottom that points to `hiveguard doctor` for detail. Piped
-  output is unchanged.
+  (✓/⚠/✖) at the bottom that points to `hiveguard doctor` for detail, and a
+  hint that each subcommand has its own `--help`. Every subcommand's `--help`
+  uses the same renderer. Piped output is unchanged.
 - `doctor --quiet` — prints a single health verdict word (fail|warn|ok), used
   by the help health line and handy for scripts.
 
@@ -94,7 +97,8 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/maximhoffman/hiveguard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/maximhoffman/hiveguard/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/maximhoffman/hiveguard/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/maximhoffman/hiveguard/compare/v1.0.0...v1.0.1
