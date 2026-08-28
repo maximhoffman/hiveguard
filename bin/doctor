@@ -5,11 +5,14 @@
 #
 #   hiveguard doctor          # read-only health check (exits non-zero on any ✖)
 #   hiveguard doctor --fix    # also apply safe, reversible repairs
+#   hiveguard doctor --quiet  # read-only; print one verdict word: fail|warn|ok
 #
 # Checks: install method + version, PATH shadowing, ~/bin leftovers, the launchd
 # daily-scan agent, the bumblebee shell guard, and prerequisites. Each line is
 # ✓ (healthy) / ! (worth noting) / ✖ (broken); a plain run exits non-zero if any
-# ✖ is present, so it is scriptable.
+# ✖ is present, so it is scriptable. --quiet is read-only (not combinable with
+# --fix) and prints nothing but that one verdict word on stdout; its exit code
+# mirrors plain doctor's (1 iff fail, else 0).
 #
 # --fix only ever: boots out + removes a launchd plist that points at a missing
 # or foreign install, removes our own obsolete ~/bin symlinks (the retired
@@ -18,13 +21,19 @@
 set -euo pipefail
 
 FIX=0
+QUIET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --fix) FIX=1 ;;
+    --quiet) QUIET=1 ;;
     -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
     *) echo "unknown flag: $1 (see: hiveguard doctor --help)" >&2; exit 2 ;;
   esac; shift
 done
+if [ "$QUIET" -eq 1 ] && [ "$FIX" -eq 1 ]; then
+  echo "doctor --quiet is read-only and cannot be combined with --fix" >&2
+  exit 2
+fi
 
 # -- resolve this script's real dir + repo root (follow the symlink chain) -----
 resolve_link() {  # print the final target of a symlink chain (BSD-safe)
@@ -61,12 +70,13 @@ else
   C_G=''; C_Y=''; C_R=''; C_B=''; C_D=''; C_0=''
 fi
 FAIL=0
-sec()    { printf '\n%s▸ %s%s\n' "$C_B" "$1" "$C_0"; }
-ok()     { printf '  %s✓%s %s\n' "$C_G" "$C_0" "$1"; }
-warn()   { printf '  %s!%s %s\n' "$C_Y" "$C_0" "$1"; }
-bad()    { printf '  %s✖%s %s\n' "$C_R" "$C_0" "$1"; FAIL=1; }
-fixed()  { printf '  %s✓%s fixed: %s\n' "$C_G" "$C_0" "$1"; }
-remedy() { printf '    %s→ %s%s\n' "$C_D" "$1" "$C_0"; }
+WARN=0
+sec()    { [ "$QUIET" -eq 1 ] && return 0; printf '\n%s▸ %s%s\n' "$C_B" "$1" "$C_0"; }
+ok()     { [ "$QUIET" -eq 1 ] && return 0; printf '  %s✓%s %s\n' "$C_G" "$C_0" "$1"; }
+warn()   { WARN=1; [ "$QUIET" -eq 1 ] && return 0; printf '  %s!%s %s\n' "$C_Y" "$C_0" "$1"; }
+bad()    { FAIL=1; [ "$QUIET" -eq 1 ] && return 0; printf '  %s✖%s %s\n' "$C_R" "$C_0" "$1"; }
+fixed()  { [ "$QUIET" -eq 1 ] && return 0; printf '  %s✓%s fixed: %s\n' "$C_G" "$C_0" "$1"; }
+remedy() { [ "$QUIET" -eq 1 ] && return 0; printf '    %s→ %s%s\n' "$C_D" "$1" "$C_0"; }
 
 # -- install method / active entry point -------------------------------------
 install_method() {
@@ -336,6 +346,15 @@ else
 fi
 
 # ── summary ─────────────────────────────────────────────────────────────────
+if [ "$QUIET" -eq 1 ]; then
+  if [ "$FAIL" -ne 0 ]; then
+    echo fail; exit 1
+  elif [ "$WARN" -ne 0 ]; then
+    echo warn; exit 0
+  else
+    echo ok; exit 0
+  fi
+fi
 echo
 if [ "$FAIL" -ne 0 ]; then
   printf '%s✖ Problems found.%s Re-run with --fix for the safe, reversible repairs; address the rest by hand.\n' "$C_R" "$C_0"
