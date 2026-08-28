@@ -28,7 +28,10 @@ while [ $# -gt 0 ]; do
     --no-cache) USE_CACHE=0 ;;
     --refresh) REFRESH=1 ;;
     -o) shift; OUT="$1" ;;
-    -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; exit 0 ;;
+    -h|--help)
+      here="$(cd "$(dirname "$0")" && pwd)"
+      if [ -t 1 ]; then awk -v pretty=1 -f "$here/help.awk" "$0"; else awk -v pretty=0 -f "$here/help.awk" "$0"; fi
+      exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac; shift
 done

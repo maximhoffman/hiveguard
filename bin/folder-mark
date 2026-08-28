@@ -67,7 +67,9 @@ XATTR_NAME="com.apple.metadata:_kMDItemUserTags"
 
 mkdir -p "$(dirname "$MARKERS")"
 
-usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+usage() {
+  if [ -t 1 ]; then awk -v pretty=1 -f "$BINDIR/help.awk" "$0"; else awk -v pretty=0 -f "$BINDIR/help.awk" "$0"; fi
+}
 warn()  { echo "folder-mark: warning: $*" >&2; }
 
 # -- resolve this script's real dir + repo root (follow the symlink chain) -----

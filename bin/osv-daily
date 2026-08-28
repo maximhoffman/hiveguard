@@ -35,7 +35,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 # --- argument parsing ------------------------------------------------------
 print_header() {
   # print this file's top comment block (what --help shows)
-  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+  local here; here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -t 1 ]; then awk -v pretty=1 -f "$here/help.awk" "$0"; else awk -v pretty=0 -f "$here/help.awk" "$0"; fi
 }
 usage_err() {
   echo "usage: osv-daily [--open | --rescan | --if-due] [path...]" >&2

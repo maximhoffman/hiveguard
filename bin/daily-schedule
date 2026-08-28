@@ -26,7 +26,9 @@ PLIST="$LA_DIR/$LABEL.plist"
 LOG="$HOME/.hiveguard/osv-daily.log"
 UID_="$(id -u)"
 
-usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+usage() {
+  if [ -t 1 ]; then awk -v pretty=1 -f "$BINDIR/help.awk" "$0"; else awk -v pretty=0 -f "$BINDIR/help.awk" "$0"; fi
+}
 
 # -- resolve this script's real dir + repo root (follow the symlink chain) -----
 src="$0"; hops=0

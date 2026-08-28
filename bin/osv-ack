@@ -54,7 +54,10 @@ MIGRATE='def to_v2:
       | from_entries)
   } end;'
 
-usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+usage() {
+  local here; here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -t 1 ]; then awk -v pretty=1 -f "$here/help.awk" "$0"; else awk -v pretty=0 -f "$here/help.awk" "$0"; fi
+}
 save()  { local tmp; tmp="$(mktemp)"; cat > "$tmp"; mv "$tmp" "$STORE"; }
 today() { date +%Y-%m-%d; }
 
