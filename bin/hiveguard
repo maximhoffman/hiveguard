@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 🐝 hiveguard — single entry point for the toolkit.
 #
+# Run `hiveguard <command> --help` for a command's own options and details.
+#
 # Actions:
 #   hiveguard add   <mgr> <pkg> [args]   # gated install: OSV-check, then install
 #   hiveguard scan  [path|--global]      # scan installed deps for known vulns
