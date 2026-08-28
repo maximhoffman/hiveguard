@@ -85,7 +85,19 @@ case "$cmd" in
     echo "$REPO"
     ;;
   help|-h|--help|"")
-    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+    if [ -t 1 ]; then
+      awk -v pretty=1 -f "$BIN/help.awk" "$src"
+      # append a one-line health verdict (doctor --quiet prints ok|warn|fail).
+      # a doctor failure or an unrecognized word prints no line — never breaks help.
+      verdict="$("$BIN/doctor" --quiet 2>/dev/null || true)"
+      case "$verdict" in
+        ok)   printf '\n\033[32m✓ everything looks healthy\033[0m\n' ;;
+        warn) printf '\n\033[33m⚠ some checks need attention — run `hiveguard doctor` for details\033[0m\n' ;;
+        fail) printf '\n\033[31m✖ problems found — run `hiveguard doctor` for details\033[0m\n' ;;
+      esac
+    else
+      awk -v pretty=0 -f "$BIN/help.awk" "$src"
+    fi
     ;;
   *)
     echo "unknown command: $cmd (see: hiveguard help)" >&2; exit 2 ;;
