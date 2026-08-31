@@ -6,6 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Batch mute from the report: each active project row has a checkbox, and the
+  toolbar gains a select-all control, a selection counter, and a
+  "Copy mute command (N)" button that copies one paste-ready block —
+  `hiveguard ack '<path>'` per selected project, joined with ` && \` line
+  continuations. Selection is page-local; the Acknowledged section is
+  unchanged.
+
 ### Changed
 - Install docs now include the `brew trust maximhoffman/hiveguard` step
   (required for any third-party tap since Homebrew 6.0) with a short

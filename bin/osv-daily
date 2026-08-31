@@ -611,8 +611,11 @@ def proj_card(pr, muted):
         head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
         whole = ''
         last = "Mute"
+    sel = ('<input type="checkbox" class="selp" '
+           f'data-ack="{html.escape("hiveguard ack " + shlex.quote(pr["src"]))}" '
+           f'aria-label="Select {short(pr["src"])} to mute">') if not muted else ''
     return (f'<details class="proj{" acked" if muted else ""}"><summary>'
-            f'<span class="chev">▶</span>'
+            f'<span class="chev">▶</span>{sel}'
             f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
             f'<span class="pname">{short(pr["src"])}</span>{whole}'
             f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
@@ -627,7 +630,12 @@ elif acked:
 else:
     body = '<p class="clean">✅ No known vulnerabilities found.</p>'
 
-toolbar = '<div class="toolbar"><button class="btn" id="toggleAll" type="button">Expand all</button></div>' if active else ''
+toolbar = ('<div class="toolbar">'
+           '<label class="selall"><input type="checkbox" id="selAll"> all</label>'
+           '<span class="selcount" id="selCount">selected 0</span>'
+           '<button class="btn" id="copySel" type="button" disabled>Copy mute command (0)</button>'
+           '<button class="btn" id="toggleAll" type="button">Expand all</button>'
+           '</div>') if active else ''
 
 acked_html = ""
 if acked:
@@ -682,9 +690,16 @@ details.proj[open]>summary .chev{{transform:rotate(90deg)}}
 .cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
 .whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
 .tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
-.toolbar{{display:flex;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
+.toolbar{{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
+.selall{{font-family:var(--mono);font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:5px;cursor:pointer}}
+.selall input{{accent-color:var(--accent);cursor:pointer}}
+.selcount{{font-family:var(--mono);font-size:12px;color:var(--faint)}}
 .btn{{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}}
 .btn:hover{{border-color:var(--accent)}}
+.btn:disabled{{opacity:.5;cursor:default}}
+.btn:disabled:hover{{border-color:var(--border)}}
+.btn.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
+.btn.ok:hover{{border-color:#1f8a44}}
 .cp{{font-family:var(--mono);font-size:11px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;flex:none;
 background:var(--surface-2);border:1px solid var(--border-strong);color:var(--muted);padding:3px 8px;border-radius:6px;
 white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
@@ -739,15 +754,29 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
       b.textContent=open?'Collapse all':'Expand all';
     }});
   }}
-  document.addEventListener('click',function(e){{
-    var btn=e.target.closest('.cp');
-    if(!btn) return;
-    e.preventDefault(); e.stopPropagation();   // don't toggle the <details>
-    var cmd=btn.getAttribute('data-cmd');
+  var selAll=document.getElementById('selAll');
+  var selCount=document.getElementById('selCount');
+  var copySel=document.getElementById('copySel');
+  function sync(){{
+    if(!copySel) return;
+    var n=document.querySelectorAll('input.selp:checked').length;
+    var total=document.querySelectorAll('input.selp').length;
+    if(selCount) selCount.textContent='selected '+n;
+    if(!copySel.classList.contains('ok')) copySel.textContent='Copy mute command ('+n+')';
+    copySel.disabled=(n===0);
+    if(selAll){{
+      selAll.checked=(n===total&&total>0);
+      selAll.indeterminate=(n>0&&n<total);
+    }}
+  }}
+  function copy(cmd,btn){{
     function done(){{
       var orig=btn.innerHTML;
       btn.classList.add('ok'); btn.textContent='✓ copied';
-      setTimeout(function(){{btn.classList.remove('ok'); btn.innerHTML=orig;}},1500);
+      setTimeout(function(){{
+        btn.classList.remove('ok');
+        if(btn===copySel) sync(); else btn.innerHTML=orig;
+      }},1500);
     }}
     function fb(){{
       var t=document.createElement('textarea'); t.value=cmd;
@@ -758,7 +787,33 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
     }}
     if(navigator.clipboard&&navigator.clipboard.writeText){{ navigator.clipboard.writeText(cmd).then(done,fb); }}
     else {{ fb(); }}
+  }}
+  document.addEventListener('click',function(e){{
+    if(e.target.closest('input.selp')){{ e.stopPropagation(); return; }}  // check the box, don't toggle the <details>
+    var btn=e.target.closest('.cp');
+    if(!btn) return;
+    e.preventDefault(); e.stopPropagation();   // don't toggle the <details>
+    copy(btn.getAttribute('data-cmd'),btn);
   }});
+  document.addEventListener('change',function(e){{
+    if(e.target.closest('input.selp')) sync();
+  }});
+  if(selAll){{
+    selAll.addEventListener('change',function(){{
+      [].slice.call(document.querySelectorAll('input.selp')).forEach(function(c){{c.checked=selAll.checked;}});
+      sync();
+    }});
+  }}
+  if(copySel){{
+    copySel.addEventListener('click',function(){{
+      var cmds=[].slice.call(document.querySelectorAll('input.selp:checked')).map(function(c){{
+        return c.getAttribute('data-ack');
+      }});
+      if(!cmds.length) return;
+      copy(cmds.join(' && \\\\\\n'),copySel);
+    }});
+  }}
+  sync();
 }})();
 </script>'''
 open(os.environ["OUT"], "w").write(page)
