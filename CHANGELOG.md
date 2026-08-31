@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Install docs now include the `brew trust maximhoffman/hiveguard` step
+  (required for any third-party tap since Homebrew 6.0) with a short
+  explanation, and drop the stale "tap not published yet" note.
+
 ## [1.3.0] - 2026-08-28
 
 ### Added

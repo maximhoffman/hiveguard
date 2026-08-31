@@ -77,24 +77,22 @@ dependency tree). Blocks on malicious (`MAL-`), warns on CVEs.
 ### Homebrew (recommended)
 
 ```bash
-brew install maximhoffman/hiveguard/hiveguard
-```
-
-or, equivalently, tap first:
-
-```bash
 brew tap maximhoffman/hiveguard
+brew trust maximhoffman/hiveguard   # see the note below
 brew install hiveguard
 ```
+
+**Why `brew trust`?** Since Homebrew 6.0, a third-party tap must be explicitly trusted
+before its formula runs — a tap can contain arbitrary code, so this is a one-time,
+per-machine confirmation that applies to *every* third-party tap (not just this one).
+Without it, `brew` ignores the tap and `brew doctor` warns. It's a single command; you
+only run it once. (Skipping the whole trust mechanism with
+`HOMEBREW_NO_REQUIRE_TAP_TRUST=1` is not recommended — it disables the check globally.)
 
 Homebrew pulls in the required tools (`jq`, `osv-scanner`, `python`) automatically as
 dependencies, so there's nothing else to install for the core scanning to work. The
 optional extras under [Prerequisites](#prerequisites) still add features (desktop
 alerts, `hiveguard brew` changelogs, the install-time gate).
-
-> **Honest note:** this needs the first tagged release to be published and the tap
-> `maximhoffman/homebrew-hiveguard` to exist. Until then, use the from-source install
-> below.
 
 The daily scan is **not** scheduled automatically. Turn it on when you want it:
 
