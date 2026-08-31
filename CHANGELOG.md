@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-31
+
 ### Added
 - Batch mute from the report: each active project row has a checkbox, and the
   toolbar gains a select-all control, a selection counter, and a
