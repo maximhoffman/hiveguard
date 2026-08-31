@@ -656,14 +656,14 @@ page = f'''<meta charset="utf-8">
 <title>OSV — projects</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{{--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
+:root{{color-scheme:light;--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
 --border:#dae0e4;--border-strong:#c6ced3;--accent:#2367a8;
 --crit:#c02636;--crit-s:#f5dade;--high:#c85a1c;--high-s:#f4e2d2;--med:#a9861f;--med-s:#f1e9d0;--low:#4a7a52;--low-s:#dfeadf;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}}
-@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;
+@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;
 --text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;--border:#242d32;--border-strong:#333e44;--accent:#5199db;
 --crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}}}
-:root[data-theme="dark"]{{--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;
+:root[data-theme="dark"]{{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;
 --border:#242d32;--border-strong:#333e44;--accent:#5199db;--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;
 --med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}}
