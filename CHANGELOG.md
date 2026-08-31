@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `hiveguard daily` without a path (including answering "y" to "Rescan now?")
+  no longer fails with "no folder to scan" when a daily schedule is
+  configured — it now rescans the schedule's folders. Passing a path still
+  overrides for that run; without a schedule the old hint remains.
+
 ## [1.4.0] - 2026-08-31
 
 ### Added

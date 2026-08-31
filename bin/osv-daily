@@ -10,11 +10,13 @@
 #   osv-daily --if-due     # scan only if today's report is missing/stale
 #   osv-daily -h|--help    # show this help
 #
-# You MUST pass one or more folders to scan — there is no whole-home default.
-# (A background scan of the whole home folder is slow and, on macOS, the OS
-# blocks a background agent from reading protected folders like Documents /
-# Desktop / Downloads, so it silently finds nothing.) Configure the folders once
-# with `hiveguard schedule on --hour H <folder>...`. A fixed set of heavyweight
+# With no path, the scan falls back to the folders configured for the daily
+# schedule (`hiveguard schedule on --hour H <folder>...`); passing a path
+# overrides that for this run only. There is no whole-home default — if no
+# schedule is configured you must name a folder. (A background scan of the
+# whole home folder is slow and, on macOS, the OS blocks a background agent
+# from reading protected folders like Documents / Desktop / Downloads, so it
+# silently finds nothing.) A fixed set of heavyweight
 # dirs (Library, Caches, node_modules, .git, .cargo, go, …) is excluded at scan
 # time so pointing at a large tree stays fast.
 #
@@ -150,7 +152,30 @@ if [ -d "$HOME/bumblebee-src/.git" ]; then
   git -C "$HOME/bumblebee-src" pull --quiet 2>/dev/null || true
 fi
 
-# We are about to scan — a folder is required (no whole-home default).
+# We are about to scan. With no folder given, fall back to the folders
+# configured for the daily schedule — the launchd plist is the single source
+# of truth (same extraction as daily-schedule's plist_folders; paths may
+# contain spaces, so read line by line).
+if [ "${#TARGETS[@]}" -eq 0 ]; then
+  SCHED_PLIST="${HIVEGUARD_SCHED_PLIST:-$HOME/Library/LaunchAgents/com.hiveguard.osv-daily.plist}"
+  if [ -f "$SCHED_PLIST" ]; then
+    while IFS= read -r _f; do
+      [ -n "$_f" ] && TARGETS+=("$_f")
+    done < <(awk '
+      /<string>daily<\/string>/    { grab=1; next }
+      /<\/array>/                  { grab=0 }
+      grab && /<string>--if-due<\/string>/ { grab=0; next }
+      grab && /<string>.*<\/string>/ {
+        s=$0; sub(/.*<string>/,"",s); sub(/<\/string>.*/,"",s); print s
+      }
+    ' "$SCHED_PLIST")
+  fi
+  if [ "${#TARGETS[@]}" -gt 0 ]; then
+    echo "scanning scheduled folders: ${TARGETS[*]}" >&2
+  fi
+fi
+
+# Still nothing → a folder is required (no whole-home default).
 if [ "${#TARGETS[@]}" -eq 0 ]; then
   echo "osv-daily: no folder to scan." >&2
   echo "  Pass one or more folders:   hiveguard daily ~/Projects" >&2
