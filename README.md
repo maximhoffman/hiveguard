@@ -46,6 +46,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
 | `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you re-ack. Muted items move to a collapsed "Acknowledged" section — never dropped. |
 | `hiveguard mark status\|on\|off\|clear\|hook` | Mark flagged project folders (Finder tag + terminal reminder). `off`/`clear` opt out; `hook` prints the line to add to `~/.zshrc`. |
+| `hiveguard strict on\|off\|status\|pause\|resume` | **Strict mode** (off by default): a project the daily scan flagged red refuses to run, build, test or install until you fix it or pause it (one project, one hour by default). Terminal-level guard only — it can't stop an IDE Run button, a double-click, Docker Desktop, or a process already running. |
 | `hiveguard doctor [--fix]` | Diagnose install/migration health (install method, PATH shadowing, obsolete `~/bin` links, the launchd agent, the shell guard, prerequisites). `--fix` applies only safe, reversible repairs. |
 | `hiveguard update` | Self-update: `brew upgrade` under a brew install, or `git pull` + re-run the installer from a source checkout. |
 
@@ -271,6 +272,10 @@ hiveguard daily --rescan   # force a fresh scan now, no prompt
 hiveguard daily --if-due   # scan only if today's report is missing/stale (used by the scheduler)
 ```
 
+`hiveguard daily --probe <path>` is internal — [strict mode](#strict-mode) uses it for
+the background scan of an unknown project: it scans just that one root into
+`~/.hiveguard/osv-probe.html`, leaving the daily report and its diff baseline alone.
+
 The report groups findings by project, sorted by severity, with the fixed-in version and
 osv.dev links for every advisory (theme-aware — adapts to light/dark):
 
@@ -401,6 +406,82 @@ the scheduled agent) runs, not the moment you ack. Markers only ever appear for 
 the daily scan actually covers, so this feature is only useful once you've set up
 `hiveguard schedule on <folders>` (or run `hiveguard daily <folders>` yourself).
 
+### Strict mode
+
+Markers tell you a project is flagged; strict mode acts on it. Once enabled, a project
+the daily scan flagged **red** (active, unacknowledged vulnerabilities) refuses to run,
+build, test or install — the shell command exits immediately, before anything happens.
+Pausing releases one project for a while; everything else stays protected.
+
+**Honest scope: it's a terminal-level guard, not a sandbox.** It only intercepts a bare
+command name resolved by a shell that sourced the hook — it cannot stop an IDE Run
+button, a double-click, Docker Desktop, or a process that's already running.
+
+Off by default. Enable it with:
+
+```bash
+hiveguard strict on
+```
+
+It needs the same terminal hook as [folder markers](#folder-markers) — `strict on`
+never edits `~/.zshrc` for you; if the hook isn't already sourced it prints the exact
+`source "…/hiveguard-hook.zsh"` line to add. Once the hook is sourced, flipping strict
+on/off takes effect at the **next prompt in every open terminal** — nothing to restart.
+
+The full verb set — `hiveguard strict on|off|status|pause|resume`:
+
+```bash
+hiveguard strict status              # on/off, hook sourced?, blocked projects, running pauses
+hiveguard strict pause [path]        # release ONE project for 1h (default)
+hiveguard strict pause --for 2h      # …or a custom duration (Nm / Nh / Nd)
+hiveguard strict resume [path]       # lift a pause early
+hiveguard strict off                 # disable — open terminals stop blocking at their next prompt
+```
+
+A refusal looks like this:
+
+```
+⛔ hiveguard strict: 12 active vulnerabilities (2 critical) in /Users/mh/Projects/app — refusing to run `npm`.
+   detail:   hiveguard daily --open
+   proceed:  fix it, or pause this project:  hiveguard strict pause   (1h; e.g. --for 2h)
+```
+
+Rules, in order:
+
+- **Red (active findings)** → blocked.
+- **Acked** (muted via `hiveguard ack`) → allowed — there's data, and it's acknowledged.
+- **No repair exemption.** `npm install`, `npm update`, `npm audit fix` and friends are
+  refused exactly like everything else — the gate never looks at a command's arguments,
+  so there's no "just let me fix it" carve-out. Pausing the project is the only way
+  through.
+- **Unknown or stale** (no marker, and no scan of this folder in the last 7 days) →
+  runs now, and kicks off one debounced background scan. Nothing to wait for — but if
+  that scan finds something, the **next** attempt is blocked.
+
+Intercepted (the default set — extend it with `strict_commands_extra=<space-separated
+names>` in `~/.hiveguard/config`):
+
+```
+npm pnpm yarn bun npx pnpx bunx node deno
+pip pip3 python python3 uv uvx poetry pipenv pytest
+cargo go
+gem bundle bundler rake ruby
+composer php
+make cmake gradle mvn mix swift just
+```
+
+**Never intercepted** (by construction — not being in the list above *is* the
+allowlist): `hiveguard`/`hvg` (every subcommand always works), `git`, `gh`, `brew`,
+`docker`, editors (`vim`, `nvim`, `code`, `subl`, `emacs`, `open`), navigation and
+inspection (`cd`, `ls`, `cat`, `less`, `find`, `rg`, `grep`), and all shell builtins.
+Only a **bare command name** resolved through the shell is intercepted — `./gradlew`,
+`./node_modules/.bin/x`, `sudo npm …`, an `alias npm=…` defined after the hook, and
+anything launched outside a shell that sourced the hook (IDE Run, double-click, Docker
+Desktop, an already-running process, `zsh -c`, cron, launchd) all bypass it.
+
+Strict mode composes with the [bumblebee](#prerequisites) install-time gate in either
+`source` order — both checks run regardless of which one loads first.
+
 ### `hiveguard brew` — read before you upgrade
 
 ```bash
@@ -438,8 +519,9 @@ hiveguard doctor --quiet  # print a single verdict word: fail|warn|ok
 `doctor` diagnoses install and migration health: how hiveguard was installed and its
 version, whether `hiveguard`/`hvg` on your `PATH` resolve to the active install (PATH
 shadowing), obsolete `~/bin` symlinks from older installs, the state of the launchd
-daily-scan agent, whether the bumblebee guard is sourced, and the prerequisites. Each
-line is ✓ (healthy) / ! (worth noting) / ✖ (broken).
+daily-scan agent, whether the bumblebee guard is sourced, strict mode (enabled but the
+hook not sourced is flagged as broken), and the prerequisites. Each line is ✓ (healthy)
+/ ! (worth noting) / ✖ (broken).
 
 `--fix` only ever performs **safe, reversible** repairs: it removes obsolete `~/bin`
 symlinks that hiveguard itself created (the retired standalone command names and the `hg`
@@ -499,6 +581,12 @@ untouched; nothing is lost in the move.
 | `osv-daily.log` | One line per scan (counts + new/resolved). |
 | `osv-acks.json` | Your acknowledgements (advisory-scoped mutes). |
 | `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed. Override with `HIVEGUARD_STATE`. |
+| `osv-markers.tsv` | Flagged project folders — `root<TAB>status<TAB>summary`, drives Finder tags, the terminal reminder, and strict mode. |
+| `strict-pauses.tsv` | Running strict-mode pauses — `root<TAB>until_epoch`. |
+| `osv-coverage.tsv` | Which folders a scan has covered and when — `target<TAB>scanned_epoch`. How strict mode tells a never-scanned project from a known-clean one. |
+| `strict-attempts.tsv` | Debounce record for strict mode's background scans — `root<TAB>attempt_epoch`. |
+| `strict.log` | One line per strict-mode background scan. |
+| `osv-probe.html` | The report from strict mode's one-project background scan (`hiveguard daily --probe`). |
 | `cache/brew-releases/` | Cached `hiveguard brew` changelogs. |
 
 ---
@@ -529,6 +617,13 @@ on npm/pip/go/cargo you get **both** databases at once.
   for Intel Macs (`/usr/local`).
 - The `real install` step of `hiveguard add` runs in the current directory — run it from
   the root of the target project, like a normal `npm install`.
+- Strict mode is a **terminal-level** guard only — it cannot stop an IDE Run button, a
+  double-click, Docker Desktop, or a process that's already running.
+- Strict mode only intercepts a **bare command name** resolved by a shell that sourced
+  the hook — `./gradlew`, `sudo npm …`, an alias, or anything launched outside such a
+  shell (cron, launchd, `zsh -c`) bypasses it.
+- `hiveguard add` inside a strict-flagged project is **not** gated — it runs its own
+  install from bash, where the strict-mode hook isn't loaded.
 
 ---
 

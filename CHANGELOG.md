@@ -6,6 +6,31 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Strict mode** (`hiveguard strict on|off|status|pause|resume`): a project the daily
+  scan flagged red refuses to run, build, test or install until you fix it or pause it.
+  Off by default; opt in with `hiveguard strict on`. The guard lives in a sibling
+  `hiveguard-strict.zsh`, auto-sourced by the existing terminal hook, so enabling it
+  needs no `~/.zshrc` change. No repair exemption — `npm install`/`update`/`audit fix`
+  are refused like everything else; pausing a project (`hiveguard strict pause [--for
+  2h]`, default 1h) is the only way through, and it's per-project and time-based.
+  Unknown or stale projects run immediately and trigger a debounced background scan, so
+  the next attempt is blocked if it finds something. Composes with the bumblebee guard
+  in either `source` order.
+- `hiveguard daily --probe <path>` — internal, scans one project root into
+  `~/.hiveguard/osv-probe.html` without touching the daily report or its diff baseline;
+  used by strict mode's background scan.
+- `~/.hiveguard/osv-coverage.tsv` — records which folders a scan has covered and when,
+  so strict mode can tell a never-scanned project from a known-clean one.
+- `hiveguard doctor` gains a strict-mode health section (on/off, hook coverage, running
+  pauses, scan coverage).
+- Installer: `--strict`/`--no-strict` flags and an interactive prompt (default **no**)
+  to enable strict mode on install.
+
+### Changed
+- Nothing behavioural changes while strict mode is off — it's inert until you run
+  `hiveguard strict on`.
+
 ## [1.4.1] - 2026-08-31
 
 ### Fixed

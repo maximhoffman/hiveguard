@@ -8,7 +8,8 @@
 #   hiveguard doctor --quiet  # read-only; print one verdict word: fail|warn|ok
 #
 # Checks: install method + version, PATH shadowing, ~/bin leftovers, the launchd
-# daily-scan agent, the bumblebee shell guard, and prerequisites. Each line is
+# daily-scan agent, the bumblebee shell guard, folder markers, strict mode, and
+# prerequisites. Each line is
 # ✓ (healthy) / ! (worth noting) / ✖ (broken); a plain run exits non-zero if any
 # ✖ is present, so it is scriptable. --quiet is read-only (not combinable with
 # --fix) and prints nothing but that one verdict word on stdout; its exit code
@@ -333,7 +334,50 @@ else
   ok "state file OK — 0 roots marked (no $MARKERS yet)"
 fi
 
-# ── 7. prerequisites ────────────────────────────────────────────────────────
+# ── 7. strict mode ───────────────────────────────────────────────────────────
+sec "strict mode"
+strict_on() {
+  local val=""
+  [ -f "$MCONFIG" ] && val="$(awk -F= '$1=="strict"{sub(/^[^=]*=/,"");v=$0} END{print v}' "$MCONFIG" 2>/dev/null || true)"
+  [ "$val" = "1" ]
+}
+if strict_on; then
+  ok "strict mode: on"
+  if [ -z "$hook_line" ]; then
+    bad "strict mode is on but the terminal hook is not sourced in ~/.zshrc — nothing is being blocked"
+    remedy "run: hiveguard mark hook   (then add the printed line to ~/.zshrc)"
+  elif [ ! -e "$(dirname "$hp_expanded")/hiveguard-strict.zsh" ]; then
+    bad "the sourced hook ($hp) has no hiveguard-strict.zsh next to it — an older install; strict mode is not active"
+    remedy "run: hiveguard mark hook"
+  else
+    ok "terminal hook provides strict mode ($hp)"
+  fi
+
+  PAUSES="${HIVEGUARD_PAUSES:-$HOME/.hiveguard/strict-pauses.tsv}"
+  running=0; malformed=0
+  if [ -f "$PAUSES" ]; then
+    now="$(date +%s)"
+    running="$(awk -F'\t' -v now="$now" 'NF>=2 && $2 ~ /^[0-9]+$/ && $2+0>now' "$PAUSES" | wc -l | tr -d ' ')"
+    malformed="$(awk -F'\t' 'NF<2 || $2 !~ /^[0-9]+$/' "$PAUSES" | wc -l | tr -d ' ')"
+  fi
+  ok "running pauses: $running"
+  [ "$malformed" -gt 0 ] && warn "pause file has $malformed malformed row(s)"
+
+  COVERAGE="${HIVEGUARD_COVERAGE:-$HOME/.hiveguard/osv-coverage.tsv}"
+  if [ ! -s "$COVERAGE" ]; then
+    warn "no scan coverage recorded yet — every project counts as unknown (runs, then scans in the background)"
+    remedy "hiveguard daily <folder>"
+  else
+    n="$(grep -c . "$COVERAGE" 2>/dev/null || true)"; n="${n:-0}"
+    fresh_epoch="$(awk -F'\t' '{if($2+0>max)max=$2+0} END{print max+0}' "$COVERAGE")"
+    fresh="$(date -r "$fresh_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || echo unknown)"
+    ok "scan coverage: $n folder(s), freshest $fresh"
+  fi
+else
+  ok "strict mode: off (enable with: hiveguard strict on)"
+fi
+
+# ── 8. prerequisites ────────────────────────────────────────────────────────
 sec "Prerequisites"
 req() { command -v "$1" >/dev/null 2>&1 && ok "$1 (required)" || { bad "$1 missing (required)"; remedy "$2"; }; }
 opt() { command -v "$1" >/dev/null 2>&1 && ok "$1 (optional)" || { warn "$1 missing (optional)"; remedy "$2"; }; }

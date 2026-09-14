@@ -5,17 +5,21 @@
 #   ./install.sh              # interactive install
 #   ./install.sh --no-agent   # skip the launchd daily-scan agent
 #   ./install.sh --hour 9     # schedule the daily scan at 09:00 (default 10:00)
+#   ./install.sh --strict     # enable strict mode (terminal guard) non-interactively
+#   ./install.sh --no-strict  # leave strict mode off non-interactively (skip the prompt)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HOME/bin"
-HOUR=10; MIN=0; WANT_AGENT=1
+HOUR=10; MIN=0; WANT_AGENT=1; WANT_STRICT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-agent) WANT_AGENT=0 ;;
     --hour) shift; HOUR="$1" ;;
     --min)  shift; MIN="$1" ;;
+    --strict)    WANT_STRICT=1 ;;
+    --no-strict) WANT_STRICT=0 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac; shift
@@ -98,6 +102,29 @@ if ! grep -q 'bumblebee-guard.sh' "$HOME/.zshrc" 2>/dev/null; then
   echo "     source \"$GUARD\""
 else
   ok "already sourced in ~/.zshrc"
+fi
+
+# ── 3b. strict mode (terminal guard) ────────────────────────────────────────
+# Off by default. A flag decides non-interactively; otherwise ask, but only
+# when stdin is a terminal — a non-interactive run with no flag stays off.
+say "Strict mode (terminal guard for red-flagged projects)"
+if [ -n "$WANT_STRICT" ]; then
+  strict_answer="$WANT_STRICT"
+elif [ -t 0 ]; then
+  printf 'Enable strict mode? A project the daily scan flags red refuses to run/build until you fix or pause it. Terminal-level only — it can'\''t stop an IDE Run button, a double-click, or a running process. [y/N] '
+  read -r strict_reply || strict_reply=""
+  case "$strict_reply" in
+    y|Y) strict_answer=1 ;;
+    *)   strict_answer=0 ;;
+  esac
+else
+  strict_answer=0
+fi
+
+if [ "$strict_answer" -eq 1 ]; then
+  "$REPO/bin/hiveguard" strict on
+else
+  ok "strict mode left off (enable any time: hiveguard strict on)"
 fi
 
 # ── 4. daily launchd agent ──────────────────────────────────────────────────

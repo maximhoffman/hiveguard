@@ -64,6 +64,13 @@ class Hiveguard < Formula
 
       Want a terminal reminder when you cd into a project hiveguard flagged?
       Add the line `hiveguard mark hook` prints to ~/.zshrc the same way.
+
+      Strict mode (off by default) makes a project the daily scan flagged red refuse
+      to run/build/install until you fix it or pause it for a while:
+        hiveguard strict on            # needs the terminal hook line above in ~/.zshrc
+        hiveguard strict pause --for 2h
+      It is a terminal-level guard: it cannot stop an IDE Run button, a double-click,
+      Docker Desktop, or a process that is already running.
     EOS
   end
 
