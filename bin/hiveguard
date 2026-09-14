@@ -10,6 +10,7 @@
 #   hiveguard brew  [args]               # changelogs of outdated formulae, pre-upgrade
 #   hiveguard ack   <path> [pkg]         # mute a project/finding in the daily report
 #   hiveguard mark  status|on|off|clear|hook   # Finder tags on flagged folders
+#   hiveguard strict on|off|status|pause|resume   # refuse to run/build a red-flagged project (terminal-level)
 #
 # Management:
 #   hiveguard schedule on|off|status   # schedule the daily scan (time + folders)
@@ -59,6 +60,7 @@ case "$cmd" in
   brew)  exec "$BIN/brew-changelog" "$@" ;;
   ack)   exec "$BIN/osv-ack" "$@" ;;
   mark)  exec "$BIN/folder-mark" "$@" ;;
+  strict) exec "$BIN/strict-mode" "$@" ;;
   schedule) exec "$BIN/daily-schedule" "$@" ;;
   doctor)   exec "$BIN/doctor" "$@" ;;
 

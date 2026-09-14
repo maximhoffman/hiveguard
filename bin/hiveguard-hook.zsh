@@ -89,3 +89,7 @@ fi
 # project warns immediately (not just on the next cd). The dedupe above keeps
 # a second `source` of this file from repeating an already-shown warning.
 _hiveguard_cd_check
+
+# Strict mode (opt-in via `hiveguard strict on`) lives in a sibling file so the one
+# `source` line above also enables the guard. Missing sibling (older install) → skip.
+[[ -r "${${(%):-%x}:a:h}/hiveguard-strict.zsh" ]] && source "${${(%):-%x}:a:h}/hiveguard-strict.zsh"

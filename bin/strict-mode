@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# strict-mode — refuse to run/build a project the daily scan flagged red.
+#
+# A terminal-level guard: while a project is red (a marker row with status
+# `active`, i.e. unacknowledged findings), the commands that would run, build,
+# test or install it are refused in the shell. It cannot stop an IDE Run
+# button, a double-click, Docker Desktop, or a process that is already running
+# — a discipline tool, not a sandbox.
+#
+# Usage:
+#   hiveguard strict status                     # on/off, hook, blocked roots, running pauses (default)
+#   hiveguard strict on                         # enable strict mode
+#   hiveguard strict off                        # disable strict mode
+#   hiveguard strict pause [path] [--for 2h]    # release ONE project for a while (default 1h; Nm/Nh/Nd)
+#   hiveguard strict resume [path | --all]      # lift a pause early
+#   hiveguard strict _bgscan [--dry-run] <root> # internal: background scan for an unknown project
+#   hiveguard strict -h | --help                # show this help
+#
+# The refusal itself lives in the zsh guard (hiveguard-strict.zsh), sourced by
+# hiveguard-hook.zsh; this tool only reads and writes the state behind it. on/off
+# flip one config key and take effect at the next prompt in every open terminal.
+# `on` NEVER edits ~/.zshrc — when the hook is not sourced it prints the line.
+#
+# A pause is time-based, per project and cross-shell: closing the terminal does
+# not end it, a new terminal honours it, and it expires on its own. Other
+# projects stay protected for its whole duration.
+#
+# State files (env override → default):
+#   HIVEGUARD_CONFIG  → ~/.hiveguard/config            # strict=1|0 (+ other keys)
+#   HIVEGUARD_MARKERS → ~/.hiveguard/osv-markers.tsv   # root<TAB>status<TAB>summary
+#   HIVEGUARD_PAUSES  → ~/.hiveguard/strict-pauses.tsv # root<TAB>until_epoch
+#   HIVEGUARD_SCHED_PLIST → the launchd plist          # which folders are scheduled
+#   (fixed) ~/.hiveguard/strict.log                    # one line per background scan
+set -euo pipefail
+
+# -- resolve this script's real dir + repo root (follow the symlink chain) -----
+src="$0"; hops=0
+while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
+  t="$(readlink "$src")"
+  case "$t" in
+    /*) src="$t" ;;
+    *)  src="$(cd "$(dirname "$src")" && pwd)/$t" ;;
+  esac
+  hops=$((hops + 1))
+done
+BINDIR="$(cd "$(dirname "$src")" && pwd)"
+REPO="$(cd "$BINDIR/.." && pwd)"
+
+CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
+MARKERS="${HIVEGUARD_MARKERS:-$HOME/.hiveguard/osv-markers.tsv}"
+PAUSES="${HIVEGUARD_PAUSES:-$HOME/.hiveguard/strict-pauses.tsv}"
+SCHED_PLIST="${HIVEGUARD_SCHED_PLIST:-$HOME/Library/LaunchAgents/com.hiveguard.osv-daily.plist}"
+STRICT_LOG="$HOME/.hiveguard/strict.log"
+
+usage() {
+  if [ -t 1 ]; then awk -v pretty=1 -f "$BINDIR/help.awk" "$0"; else awk -v pretty=0 -f "$BINDIR/help.awk" "$0"; fi
+}
+
+# Resolve the hook script's stable path for this install: a brew install ships
+# a VERSION file (method=brew) and the opt-prefix libexec path survives version
+# upgrades (never the versioned Cellar path); a git checkout uses the sibling.
+hook_script_path() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo "$(brew --prefix hiveguard)/libexec/bin/hiveguard-hook.zsh"
+  else
+    echo "$BINDIR/hiveguard-hook.zsh"
+  fi
+}
+
+# Print the `Terminal hook:` line exactly as `folder-mark status` prints it, and
+# — when the hook is not sourced — the line to add. We never write ~/.zshrc.
+hook_status_line() {
+  local zshrc="$HOME/.zshrc" hook_line sp sp_expanded hp
+  hook_line="$(grep -n 'hiveguard-hook\.zsh' "$zshrc" 2>/dev/null | head -n1 || true)"
+  if [ -z "$hook_line" ]; then
+    echo "Terminal hook: not sourced in ~/.zshrc"
+    hp="$(hook_script_path)"
+    echo "  strict mode needs it — add this line to ~/.zshrc, then open a new terminal:"
+    echo "  source \"$hp\""
+    return 0
+  fi
+  sp="$(printf '%s' "$hook_line" | sed -n 's/.*source[[:space:]]*["'\'']\{0,1\}\([^"'\'' ]*hiveguard-hook\.zsh\).*/\1/p' | head -n1 || true)"
+  sp_expanded="${sp/#\$HOME/$HOME}"; sp_expanded="${sp_expanded/#\~/$HOME}"
+  if [ -n "$sp_expanded" ] && [ ! -e "$sp_expanded" ]; then
+    echo "Terminal hook: sourced in ~/.zshrc, but $sp no longer exists"
+  else
+    echo "Terminal hook: sourced in ~/.zshrc${sp:+ ($sp)}"
+  fi
+}
+
+# --- config ------------------------------------------------------------------
+# Read a key=value from the config file; print $2 when the key is absent/empty.
+config_get() {
+  local key="$1" def="$2" val=""
+  if [ -f "$CONFIG" ]; then
+    val="$(awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");v=$0} END{print v}' \
+           "$CONFIG" 2>/dev/null || true)"
+  fi
+  if [ -n "$val" ]; then printf '%s' "$val"; else printf '%s' "$def"; fi
+}
+# Write/replace a key=value in the config file (atomic replace of that key).
+config_set() {
+  local key="$1" val="$2" tmp
+  mkdir -p "$(dirname "$CONFIG")"
+  tmp="$(mktemp)"
+  [ -f "$CONFIG" ] && awk -F= -v k="$key" '$1!=k' "$CONFIG" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$CONFIG"
+}
+strict_on() { [ "$(config_get strict 0)" = "1" ]; }
+
+# --- paths -------------------------------------------------------------------
+# Canonicalize a path (resolve symlinks) — best-effort, prints the input on
+# failure. The zsh gate matches a realpath'd $PWD, so every root we record MUST
+# be realpath'd or the gate silently won't match it.
+canon_path() {
+  local p="$1" c
+  c="$(cd "$p" 2>/dev/null && pwd -P)" && { printf '%s' "$c"; return 0; }
+  python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null \
+    || printf '%s' "$p"
+}
+
+# Innermost (longest) marker root that equals or contains $1; empty when none.
+marker_root_for() {
+  local cur="$1" best="" r
+  [ -f "$MARKERS" ] || { printf ''; return 0; }
+  while IFS=$'\t' read -r r _s _summary; do
+    [ -n "$r" ] || continue
+    if [ "$cur" = "$r" ] || [ "${cur#"$r"/}" != "$cur" ]; then
+      if [ "${#r}" -gt "${#best}" ]; then best="$r"; fi
+    fi
+  done < "$MARKERS"
+  printf '%s' "$best"
+}
+
+# Nearest ancestor of $1 (including itself) holding a .git dir or file.
+git_root_for() {
+  local d="$1"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    if [ -e "$d/.git" ]; then printf '%s' "$d"; return 0; fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+# The project root a path belongs to — same rules the zsh gate applies:
+# innermost marker root, else nearest .git ancestor, else the canonical path.
+resolve_root() {
+  local p="${1:-$PWD}" c m g
+  c="$(canon_path "$p")"
+  m="$(marker_root_for "$c")"
+  if [ -n "$m" ]; then printf '%s' "$m"; return 0; fi
+  if g="$(git_root_for "$c")"; then printf '%s' "$g"; return 0; fi
+  printf '%s' "$c"
+}
+
+has_active_marker() {
+  local root="$1"
+  [ -f "$MARKERS" ] || return 1
+  awk -F'\t' -v r="$root" '$1==r && $2=="active"{found=1} END{exit found?0:1}' "$MARKERS"
+}
+
+# --- pauses ------------------------------------------------------------------
+# Every write prunes rows that already expired, so the file never grows stale.
+pauses_prune() {  # keep only running rows; no-op when the file does not exist
+  local now tmp
+  [ -f "$PAUSES" ] || return 0
+  now="$(date +%s)"
+  tmp="$(mktemp)"
+  awk -F'\t' -v now="$now" 'NF>=2 && $2+0>now' "$PAUSES" > "$tmp" || true
+  mv "$tmp" "$PAUSES"
+}
+pauses_upsert() {  # root until_epoch — prune expired + atomic replace of that row
+  local root="$1" until="$2" now tmp
+  mkdir -p "$(dirname "$PAUSES")"
+  now="$(date +%s)"
+  tmp="$(mktemp)"
+  [ -f "$PAUSES" ] && awk -F'\t' -v r="$root" -v now="$now" \
+    'NF>=2 && $1!=r && $2+0>now' "$PAUSES" > "$tmp" || true
+  printf '%s\t%s\n' "$root" "$until" >> "$tmp"
+  mv "$tmp" "$PAUSES"
+}
+pause_running_for() {  # root — 0 when a still-running pause row exists
+  local root="$1" now
+  [ -f "$PAUSES" ] || return 1
+  now="$(date +%s)"
+  awk -F'\t' -v r="$root" -v now="$now" \
+    'NF>=2 && $1==r && $2+0>now{found=1} END{exit found?0:1}' "$PAUSES"
+}
+
+# --- schedule ----------------------------------------------------------------
+# The folders configured for the daily scan — the launchd plist is the single
+# source of truth (same extraction as osv-daily's fallback; paths may contain
+# spaces, so read line by line). Missing plist → no folders.
+# The extraction is line-oriented, so a plist whose tags share a line (hand
+# written, or an editor that reflowed it) would yield nothing; a first pass
+# splits `><` onto separate lines first. Harmless for the plist
+# daily-schedule generates, which already has one <string> per line.
+sched_folders() {
+  [ -f "$SCHED_PLIST" ] || return 0
+  awk '{ gsub(/></, ">\n<"); print }' "$SCHED_PLIST" | awk '
+    /<string>daily<\/string>/    { grab=1; next }
+    /<\/array>/                  { grab=0 }
+    grab && /<string>--if-due<\/string>/ { grab=0; next }
+    grab && /<string>.*<\/string>/ {
+      s=$0; sub(/.*<string>/,"",s); sub(/<\/string>.*/,"",s); print s
+    }
+  '
+}
+
+# --- verbs -------------------------------------------------------------------
+verb="${1:-status}"; [ $# -gt 0 ] && shift || true
+
+case "$verb" in
+  -h|--help|help)
+    usage ;;
+
+  on)
+    config_set strict 1
+    echo "✔ Strict mode on — flagged (red) projects refuse to run/build/install until you fix or pause them."
+    echo "  Terminal-level guard: it cannot stop an IDE Run button, a double-click, Docker Desktop, or a process already running."
+    echo "  Takes effect at the next prompt in every open terminal."
+    hook_status_line
+    ;;
+
+  off)
+    config_set strict 0
+    echo "✔ Strict mode off. Open terminals stop blocking at their next prompt." ;;
+
+  status)
+    if strict_on; then
+      echo "Strict mode: on"
+    else
+      echo "Strict mode: off  (enable: hiveguard strict on)"
+    fi
+    hook_status_line
+
+    nblocked=0
+    if [ -f "$MARKERS" ]; then
+      nblocked="$(awk -F'\t' '$2=="active"' "$MARKERS" | wc -l | tr -d ' ')"
+    fi
+    echo "Blocked (red) projects: $nblocked"
+    if [ "$nblocked" -gt 0 ]; then
+      while IFS=$'\t' read -r r s summary; do
+        [ "$s" = "active" ] || continue
+        printf '  %s\t%s\n' "$r" "$summary"
+      done < "$MARKERS"
+    else
+      echo "  (none)"
+    fi
+
+    pauses_prune       # expired rows disappear as a side effect of looking
+    echo "Paused:"
+    npaused=0
+    if [ -s "$PAUSES" ]; then
+      now="$(date +%s)"
+      while IFS=$'\t' read -r r until; do
+        [ -n "$r" ] || continue
+        mins=$(( (until - now + 59) / 60 ))
+        printf '  %s\tuntil %s (%s min left)\n' \
+          "$r" "$(date -r "$until" '+%Y-%m-%d %H:%M')" "$mins"
+        npaused=$((npaused + 1))
+      done < "$PAUSES"
+    fi
+    [ "$npaused" -gt 0 ] || echo "  (none)"
+    ;;
+
+  pause)
+    path=""; dur="1h"; have_path=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --for)
+          shift
+          [ -n "${1:-}" ] || { echo "strict pause: --for needs a duration (30m, 2h, 1d)" >&2; exit 2; }
+          dur="$1" ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "strict pause: unknown option: $1" >&2; exit 2 ;;
+        *)
+          [ "$have_path" = 0 ] || { echo "strict pause: too many arguments: $1" >&2; exit 2; }
+          path="$1"; have_path=1 ;;
+      esac
+      shift
+    done
+    case "$dur" in
+      [0-9]*[mhd]) : ;;
+      *) echo "invalid --for: $dur  (use 30m, 2h, 1d)" >&2; exit 2 ;;
+    esac
+    num="${dur%?}"; unit="${dur#"$num"}"
+    case "$num" in
+      ''|*[!0-9]*) echo "invalid --for: $dur  (use 30m, 2h, 1d)" >&2; exit 2 ;;
+    esac
+    case "$unit" in
+      m) secs=$((num * 60)) ;;
+      h) secs=$((num * 3600)) ;;
+      d) secs=$((num * 86400)) ;;
+      *) echo "invalid --for: $dur  (use 30m, 2h, 1d)" >&2; exit 2 ;;
+    esac
+
+    root="$(resolve_root "${path:-$PWD}")"
+    until=$(( $(date +%s) + secs ))
+    pauses_upsert "$root" "$until"
+    printf '✔ Strict mode paused for %s until %s (%s). Other projects stay protected.\n' \
+      "$root" "$(date -r "$until" '+%Y-%m-%d %H:%M')" "$dur"
+    printf '  lift early: hiveguard strict resume "%s"\n' "$root"
+    has_active_marker "$root" || \
+      echo "  (note: this project is not currently flagged — the pause is recorded anyway)"
+    ;;
+
+  resume)
+    if [ "${1:-}" = "--all" ]; then
+      mkdir -p "$(dirname "$PAUSES")"
+      : > "$PAUSES"
+      echo "✔ All pauses lifted."
+      exit 0
+    fi
+    case "${1:-}" in
+      -h|--help) usage; exit 0 ;;
+      -*) echo "strict resume: unknown option: $1" >&2; exit 2 ;;
+    esac
+    root="$(resolve_root "${1:-$PWD}")"
+    if pause_running_for "$root"; then
+      lifted=1
+    else
+      lifted=0
+    fi
+    if [ -f "$PAUSES" ]; then
+      now="$(date +%s)"
+      tmp="$(mktemp)"
+      awk -F'\t' -v r="$root" -v now="$now" 'NF>=2 && $1!=r && $2+0>now' "$PAUSES" > "$tmp" || true
+      mv "$tmp" "$PAUSES"
+    fi
+    if [ "$lifted" = 1 ]; then
+      echo "✔ Pause lifted for $root."
+    else
+      echo "No pause active for $root."
+    fi
+    ;;
+
+  _bgscan)
+    dry=0
+    if [ "${1:-}" = "--dry-run" ]; then dry=1; shift; fi
+    root="${1:-}"
+    [ -n "$root" ] || { echo "usage: hiveguard strict _bgscan [--dry-run] <root>" >&2; exit 2; }
+    root="$(canon_path "$root")"
+
+    mode=probe
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      c="$(canon_path "$f")"
+      if [ "$root" = "$c" ] || [ "${root#"$c"/}" != "$root" ]; then mode=rescan; break; fi
+    done < <(sched_folders)
+
+    if [ "$dry" = 1 ]; then
+      if [ "$mode" = rescan ]; then echo "rescan"; else echo "probe $root"; fi
+      exit 0
+    fi
+
+    mkdir -p "$(dirname "$STRICT_LOG")"
+    rc=0
+    if [ "$mode" = rescan ]; then
+      "$BINDIR/osv-daily" --rescan >> "$STRICT_LOG" 2>&1 || rc=$?
+    else
+      "$BINDIR/osv-daily" --probe "$root" >> "$STRICT_LOG" 2>&1 || rc=$?
+    fi
+    printf '[%s] bgscan %s → %s rc=%s\n' "$(date '+%Y-%m-%d %H:%M')" "$root" "$mode" "$rc" \
+      >> "$STRICT_LOG"
+    exit 0 ;;
+
+  *)
+    echo "unknown verb: $verb (see: hiveguard strict --help)" >&2; exit 2 ;;
+esac

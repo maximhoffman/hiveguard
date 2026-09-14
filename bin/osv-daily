@@ -8,6 +8,7 @@
 #   osv-daily --open       # just open the last report (never scans)
 #   osv-daily --rescan     # force a fresh scan now (never prompts)
 #   osv-daily --if-due     # scan only if today's report is missing/stale
+#   osv-daily --probe <p>  # internal: scan ONE project root into its own report
 #   osv-daily -h|--help    # show this help
 #
 # With no path, the scan falls back to the folders configured for the daily
@@ -31,6 +32,14 @@
 # ("new pierces the mute"); re-run `hiveguard ack` to fold it in.
 # The scan also writes ~/.hiveguard/osv-last-scan.json (override: HIVEGUARD_STATE)
 # — the last scan's summary and the baseline for the "new since last scan" diff.
+# Every successful scan also upserts one row per scanned folder into
+# ~/.hiveguard/osv-coverage.tsv (override: HIVEGUARD_COVERAGE), `folder<TAB>epoch`
+# — how strict mode tells a never-scanned project from a known-clean one.
+#
+# --probe <path> is the internal one-project scan strict mode kicks off in the
+# background: it never prompts, writes its report to ~/.hiveguard/osv-probe.html,
+# leaves the daily report and the osv-last-scan.json baseline untouched, and
+# still syncs that root's folder marker and its coverage row.
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
@@ -42,6 +51,7 @@ print_header() {
 }
 usage_err() {
   echo "usage: osv-daily [--open | --rescan | --if-due] [path...]" >&2
+  echo "       osv-daily --probe <path>" >&2
   exit 2
 }
 # Canonicalize a path (resolve symlinks) — best-effort, prints the input on
@@ -55,13 +65,17 @@ canon_path() {
     || printf '%s' "$p"
 }
 
-open_flag=0; rescan_flag=0; ifdue_flag=0; TARGETS=()
+open_flag=0; rescan_flag=0; ifdue_flag=0; probe_flag=0; PROBE_PATH=""; TARGETS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) print_header; exit 0 ;;
     --open)    open_flag=1 ;;
     --rescan)  rescan_flag=1 ;;
     --if-due)  ifdue_flag=1 ;;
+    --probe)
+      shift
+      [ $# -gt 0 ] || { echo "osv-daily: --probe needs a path" >&2; usage_err; }
+      probe_flag=1; PROBE_PATH="$1" ;;
     --)        shift; while [ $# -gt 0 ]; do TARGETS+=("$1"); shift; done; break ;;
     -*)        echo "osv-daily: unknown option: $1" >&2; usage_err ;;
     *)         TARGETS+=("$1") ;;
@@ -71,6 +85,16 @@ done
 if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; }; then
   echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
   exit 2
+fi
+# --probe is the strict-mode background scan of ONE project root: exactly one
+# path, no mode flags, its own report, no state baseline (see below).
+if [ "$probe_flag" = 1 ]; then
+  if [ "$open_flag" = 1 ] || [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ] \
+     || [ "${#TARGETS[@]}" -gt 0 ]; then
+    echo "osv-daily: --probe takes exactly one path and cannot be combined with --open, --rescan or --if-due" >&2
+    exit 2
+  fi
+  TARGETS=("$PROBE_PATH")
 fi
 # A single, stable, comparable string representing the whole scanned set — used
 # for the report header and the state file's `target` (so a later diff can tell
@@ -89,6 +113,9 @@ for _d in "${EXCLUDE_DIRS[@]}"; do EXCLUDE_ARGS+=(--experimental-exclude "$_d");
 
 REPORT="$HOME/.hiveguard/osv-projects.html"
 STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
+COVERAGE="${HIVEGUARD_COVERAGE:-$HOME/.hiveguard/osv-coverage.tsv}"
+# A probe writes its own report and never reads or writes the daily baseline.
+[ "$probe_flag" = 1 ] && REPORT="$HOME/.hiveguard/osv-probe.html"
 
 # --- open-or-rescan gate (evaluated before any scan) -----------------------
 report_is_today() { [ -f "$REPORT" ] && [ "$(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; }
@@ -124,6 +151,8 @@ if [ "$open_flag" = 1 ]; then
   exit 1
 elif [ "$rescan_flag" = 1 ]; then
   :   # always scan, never prompt
+elif [ "$probe_flag" = 1 ]; then
+  :   # background probe: always scan, never prompt, never open
 elif [ "$ifdue_flag" = 1 ]; then
   if report_is_today; then exit 0; fi   # fresh → nothing to do, silently
   # else: scan silently
@@ -198,6 +227,8 @@ SCAN_TARGETS=""
 # identical to before: silent, stderr discarded, exit code swallowed.
 SHOW_PROGRESS=0
 { [ -t 1 ] && [ -t 2 ]; } && SHOW_PROGRESS=1
+[ "$probe_flag" = 1 ] && SHOW_PROGRESS=0   # a background probe animates nothing
+scan_rc=0
 if [ "$SHOW_PROGRESS" = 1 ]; then
   # Background the scan so we can animate while it runs: stdout->JSON,
   # stderr->ERRFILE (osv-scanner prints its "Scanned … found N packages" walk
@@ -221,7 +252,7 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
     fi
     sleep 0.2
   done
-  scan_rc=0; wait "$_scan_pid" || scan_rc=$?
+  wait "$_scan_pid" || scan_rc=$?
   printf '\r\033[K' >&2   # clear the line — net zero extra lines on a clean run
   # Surface a genuine failure (exit >1, or no JSON produced) rather than the
   # silent 0 the non-interactive path yields. Then fall through to the shared
@@ -231,13 +262,23 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
     grep -v '^Scanned ' "$ERRFILE" 2>/dev/null | tail -5 >&2 || true
   fi
 else
-  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || true
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || scan_rc=$?
 fi
+# Did the scanner actually produce results? osv-scanner exits 1 when it FOUND
+# vulnerabilities (not an error) and >1 on a real failure (e.g. 128 = no package
+# sources). Judged BEFORE the empty-JSON fallback below, which deliberately turns
+# a failure into a "0 results" report — coverage must not record that as a scan.
+SCAN_OK=0
+{ [ -s "$JSON" ] && { [ "$scan_rc" = 0 ] || [ "$scan_rc" = 1 ]; }; } && SCAN_OK=1
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
+
+# A probe must leave the daily baseline alone: with STATE empty python neither
+# reads a baseline (so nothing is reported "new") nor writes the state file.
+[ "$probe_flag" = 1 ] && STATE=""
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" python3 <<'PYEOF'
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" python3 <<'PYEOF'
 import json, os, html, re, shlex
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
@@ -477,6 +518,10 @@ acked.sort(key=lambda x: x["maxsev"], reverse=True)
 # .git (a monorepo) collapse to ONE root. A root that IS itself a scan target is
 # skipped (a stray manifest in a container dir must not tag the whole container).
 scan_targets = [os.path.realpath(t) for t in os.environ.get("SCAN_TARGETS", "").split("\n") if t]
+# Under --probe the single scan target IS the project root (strict mode probes a
+# resolved root), so the "a root that is a scan target must not be marked" rule
+# — meant to stop a stray manifest tagging a whole container dir — is disabled.
+probe = os.environ.get("PROBE", "0") == "1"
 
 def finding_root(src):
     d0 = os.path.realpath(os.path.dirname(src))
@@ -506,7 +551,7 @@ def _root_entry(root):
     return root_agg.setdefault(root, {"av": 0, "ac": 0, "kv": 0, "has_active": False})
 for pr in active:
     root = finding_root(pr["src"])
-    if root in scan_targets:         # skip a root that IS a scan target
+    if root in scan_targets and not probe:   # skip a root that IS a scan target
         continue
     e = _root_entry(root); e["has_active"] = True
     for p in pr["pkgs"]:
@@ -514,7 +559,7 @@ for pr in active:
         if p["sev"] >= 9: e["ac"] += 1
 for pr in acked:
     root = finding_root(pr["src"])
-    if root in scan_targets:
+    if root in scan_targets and not probe:
         continue
     e = _root_entry(root)
     for p in pr["pkgs"]:
@@ -860,6 +905,21 @@ if [ "${#CANON_TARGETS[@]}" -gt 0 ]; then
   "$(dirname "$0")/folder-mark" sync "${_mark_args[@]}" < "$MARKS" 2>/dev/null || true
 fi
 
+# Scan coverage: one row per scanned folder, `folder<TAB>epoch`, upserted only
+# when the scanner really ran (SCAN_OK). Strict mode reads this to tell a
+# known-clean project (scanned recently, no marker row) from a never-scanned one.
+# Rows for folders this run didn't scan are preserved; each write is atomic.
+if [ "$SCAN_OK" = 1 ] && [ "${#CANON_TARGETS[@]}" -gt 0 ]; then
+  mkdir -p "$(dirname "$COVERAGE")"
+  _cov_now="$(date +%s)"
+  for _t in "${CANON_TARGETS[@]}"; do
+    _cov_tmp="$(mktemp)"
+    [ -f "$COVERAGE" ] && awk -F'\t' -v r="$_t" '$1!=r' "$COVERAGE" > "$_cov_tmp" || true
+    printf '%s\t%s\n' "$_t" "$_cov_now" >> "$_cov_tmp"
+    mv "$_cov_tmp" "$COVERAGE"
+  done
+fi
+
 # "· N new" suffix (notification + done-line) and " new=N" (log), only when > 0
 new_suffix=""; new_log=""
 if [ "${NEW_VULNS:-0}" -gt 0 ]; then new_suffix=" · $NEW_VULNS new"; new_log=" new=$NEW_VULNS"; fi
@@ -867,7 +927,10 @@ if [ "${NEW_VULNS:-0}" -gt 0 ]; then new_suffix=" · $NEW_VULNS new"; new_log=" 
 # marker summary for the log: R=active roots (red tag), Y=acked roots (yellow)
 mark_log=" markers=R${MARK_ACTIVE:-0},Y${MARK_ACKED:-0}"
 
-echo "[$STAMP] projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS)$mark_log → $REPORT" >> "$LOGDIR/osv-daily.log"
+# a probe's log line is the normal one prefixed with "probe " (same log file)
+log_kind=""; [ "$probe_flag" = 1 ] && log_kind="probe "
+
+echo "[$STAMP] ${log_kind}projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS)$mark_log → $REPORT" >> "$LOGDIR/osv-daily.log"
 
 # notification only on ACTIVE (non-acknowledged) findings
 if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
