@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-14
+
 ### Added
 - **Strict mode** (`hiveguard strict on|off|status|pause|resume`): a project the daily
   scan flagged red refuses to run, build, test or install until you fix it or pause it.
@@ -30,6 +32,9 @@ adhere to [Semantic Versioning](https://semver.org/).
 ### Changed
 - Nothing behavioural changes while strict mode is off — it's inert until you run
   `hiveguard strict on`.
+- Terminals opened *before* this upgrade do not pick up the guard until the hook is
+  re-sourced (`source "…/hiveguard-hook.zsh"`) or a new window is opened. New terminals
+  need nothing.
 
 ## [1.4.1] - 2026-08-31
 
