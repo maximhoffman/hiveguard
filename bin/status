@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# status — one read-only snapshot of hiveguard's state: last scan, new findings, protection, strict.
+#
+# Usage:
+#   hiveguard status            # short human summary
+#   hiveguard status --json     # the same facts as one compact JSON document
+#   hiveguard status -h|--help  # show this help
+#
+# The --json document is a versioned cross-repo contract (consumed by the
+# companion menu bar app); its normative description — every field, the
+# compatibility rule and the schema history — is docs/status-json.md. Change
+# both in the same commit.
+#
+# Read-only: it never writes a file, never prunes expired pauses (they are only
+# filtered out of the output), and calls launchctl with `print` only. No
+# network; finishes well under a second. Exit 0 whenever it printed, 2 on a bad
+# argument.
+#
+# Reads (env override → default):
+#   HIVEGUARD_RUN           → ~/.hiveguard/osv-run.json        # outcome of the last daily run
+#   HIVEGUARD_ACKS          → ~/.hiveguard/osv-acks.json       # acknowledgements (v1 or v2)
+#   HIVEGUARD_REPORT_OPENED → ~/.hiveguard/osv-report-opened   # epoch the report was last opened
+#   HIVEGUARD_SCAN_PID      → ~/.hiveguard/osv-daily.pid       # pid of a scan in progress
+#   HIVEGUARD_APP_PID       → ~/.hiveguard/menubar.pid         # pid of the menu bar app
+#   HIVEGUARD_SCHED_PLIST   → the launchd plist                # scheduled folders + time
+#   HIVEGUARD_CONFIG        → ~/.hiveguard/config              # strict=1|0
+#   HIVEGUARD_MARKERS       → ~/.hiveguard/osv-markers.tsv     # root<TAB>status<TAB>summary
+#   HIVEGUARD_PAUSES        → ~/.hiveguard/strict-pauses.tsv   # root<TAB>until_epoch
+#   (fixed) ~/.hiveguard/osv-projects.html, ~/.zshrc, launchctl print gui/<uid>/com.hiveguard.osv-daily
+set -euo pipefail
+
+export PATH="${HIVEGUARD_TOOL_PATH:+$HIVEGUARD_TOOL_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+command -v jq >/dev/null 2>&1 || { echo "status: jq is required (brew install jq)" >&2; exit 1; }
+
+# -- resolve this script's real dir + repo root (follow the symlink chain) -----
+src="$0"; hops=0
+while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
+  t="$(readlink "$src")"
+  case "$t" in
+    /*) src="$t" ;;
+    *)  src="$(cd "$(dirname "$src")" && pwd)/$t" ;;
+  esac
+  hops=$((hops + 1))
+done
+BINDIR="$(cd "$(dirname "$src")" && pwd)"
+REPO="$(cd "$BINDIR/.." && pwd)"
+
+RUN="${HIVEGUARD_RUN:-$HOME/.hiveguard/osv-run.json}"
+ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
+OPENED="${HIVEGUARD_REPORT_OPENED:-$HOME/.hiveguard/osv-report-opened}"
+SCAN_PID="${HIVEGUARD_SCAN_PID:-$HOME/.hiveguard/osv-daily.pid}"
+APP_PID="${HIVEGUARD_APP_PID:-$HOME/.hiveguard/menubar.pid}"
+SCHED_PLIST="${HIVEGUARD_SCHED_PLIST:-$HOME/Library/LaunchAgents/com.hiveguard.osv-daily.plist}"
+CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
+MARKERS="${HIVEGUARD_MARKERS:-$HOME/.hiveguard/osv-markers.tsv}"
+PAUSES="${HIVEGUARD_PAUSES:-$HOME/.hiveguard/strict-pauses.tsv}"
+REPORT="$HOME/.hiveguard/osv-projects.html"
+LABEL="com.hiveguard.osv-daily"
+
+usage() {
+  if [ -t 1 ]; then awk -v pretty=1 -f "$BINDIR/help.awk" "$src"; else awk -v pretty=0 -f "$BINDIR/help.awk" "$src"; fi
+}
+
+json=0
+for a in "$@"; do
+  case "$a" in
+    --json)    json=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "status: unknown argument: $a (see: hiveguard status --help)" >&2; exit 2 ;;
+  esac
+done
+
+# -- helpers (copied from the tools that own each fact) ------------------------
+# same as bin/hiveguard install_method
+install_method() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo brew
+  elif [ -e "$REPO/.git" ]; then
+    echo git
+  else
+    echo unknown
+  fi
+}
+# same as bin/strict-mode config_get
+config_get() {
+  local key="$1" def="$2" val=""
+  if [ -f "$CONFIG" ]; then
+    val="$(awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");v=$0} END{print v}' \
+           "$CONFIG" 2>/dev/null || true)"
+  fi
+  if [ -n "$val" ]; then printf '%s' "$val"; else printf '%s' "$def"; fi
+}
+# same as bin/strict-mode hook_script_path
+hook_script_path() {
+  if [ -f "$REPO/VERSION" ] && grep -q '^method=brew$' "$REPO/VERSION"; then
+    echo "$(brew --prefix hiveguard)/libexec/bin/hiveguard-hook.zsh"
+  else
+    echo "$BINDIR/hiveguard-hook.zsh"
+  fi
+}
+# same as bin/daily-schedule xml_unescape
+xml_unescape() { printf '%s' "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'; }
+# a pid file naming a live process → that pid; else nothing
+live_pid() {
+  local p
+  [ -f "$1" ] || return 0
+  p="$(tr -d ' \t\n' < "$1" 2>/dev/null || true)"
+  case "$p" in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$p" 2>/dev/null && printf '%s' "$p"
+  return 0
+}
+# a readable file, or /dev/null (for jq --rawfile)
+or_null() { if [ -r "$1" ] && [ -f "$1" ]; then printf '%s' "$1"; else printf '/dev/null'; fi; }
+
+# -- facts ---------------------------------------------------------------------
+now="$(date +%s)"
+version="$("$BINDIR/hiveguard" version 2>/dev/null | head -n1 || true)"
+version="${version% (brew)}"
+method="$(install_method)"
+scan_pid="$(live_pid "$SCAN_PID")"
+app_pid="$(live_pid "$APP_PID")"
+report_exists=false; [ -f "$REPORT" ] && report_exists=true
+
+# schedule: folders = the ProgramArguments after `daily` (same extraction as
+# osv-daily / daily-schedule), time = StartCalendarInterval (daily-schedule's sed)
+sched_configured=false; sched_hour=""; sched_min=""; folders=""
+if [ -f "$SCHED_PLIST" ]; then
+  sched_configured=true
+  while IFS= read -r _f; do
+    [ -n "$_f" ] && folders="$folders$(xml_unescape "$_f")"$'\n'
+  done < <(awk '
+    /<string>daily<\/string>/    { grab=1; next }
+    /<\/array>/                  { grab=0 }
+    grab && /<string>--if-due<\/string>/ { grab=0; next }
+    grab && /<string>.*<\/string>/ {
+      s=$0; sub(/.*<string>/,"",s); sub(/<\/string>.*/,"",s); print s
+    }
+  ' "$SCHED_PLIST")
+  sched_hour="$(sed -n 's/.*<key>Hour<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$SCHED_PLIST" | head -n1)"
+  sched_min="$(sed -n 's/.*<key>Minute<\/key><integer>\([0-9]*\)<\/integer>.*/\1/p' "$SCHED_PLIST" | head -n1)"
+fi
+sched_loaded=false
+launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && sched_loaded=true
+
+strict_enabled=false; [ "$(config_get strict 0)" = "1" ] && strict_enabled=true
+hook_sourced=false; hook_hint=""
+if grep -q 'hiveguard-hook\.zsh' "$HOME/.zshrc" 2>/dev/null; then
+  hook_sourced=true
+else
+  hook_hint="source \"$(hook_script_path)\""
+fi
+
+# -- assemble (one jq) ---------------------------------------------------------
+# Ack store migration: MIGRATE copied verbatim from bin/osv-ack (v1 → v2).
+MIGRATE='def to_v2:
+  if (.schema == 2) then .
+  else {
+    schema: 2,
+    projects: ((.projects // [])
+      | map({key: ., value: {ids: null, since: null}}) | from_entries),
+    packages: ((.packages // {}) | to_entries
+      | map({key: .key,
+             value: (.value | map({key: ., value: {ids: null, since: null}})
+                     | from_entries)})
+      | from_entries)
+  } end;'
+
+DOC="$(jq -nc \
+  --rawfile run_raw "$(or_null "$RUN")" \
+  --rawfile acks_raw "$(or_null "$ACKS")" \
+  --rawfile opened_raw "$(or_null "$OPENED")" \
+  --rawfile markers_raw "$(or_null "$MARKERS")" \
+  --rawfile pauses_raw "$(or_null "$PAUSES")" \
+  --argjson now "$now" \
+  --arg version "$version" --arg method "$method" \
+  --arg scan_pid "$scan_pid" --arg app_pid "$app_pid" \
+  --arg home "$HOME" --arg report "$REPORT" --argjson report_exists "$report_exists" \
+  --argjson sched_configured "$sched_configured" --argjson sched_loaded "$sched_loaded" \
+  --arg sched_hour "$sched_hour" --arg sched_min "$sched_min" --arg folders "$folders" \
+  --argjson strict_enabled "$strict_enabled" --argjson hook_sourced "$hook_sourced" \
+  --arg hook_hint "$hook_hint" \
+  "$MIGRATE"'
+  def parse_obj: (try fromjson catch null) | if type == "object" then . else null end;
+  def lines: split("\n") | map(select(length > 0));
+  def intornull: if test("^[0-9]+$") then tonumber else null end;
+
+  ($run_raw | parse_obj) as $run
+  | (($acks_raw | parse_obj) // {} | to_v2) as $acks
+  | def acked($src; $pkg; $id):
+        ( ($acks.projects // {})[$src] as $p
+          | $p != null and ($p.ids == null or ((($p.ids[$pkg]) // []) | index($id)) != null) )
+     or ( (($acks.packages // {})[$src] // {})[$pkg] as $k
+          | $k != null and ($k.ids == null or (($k.ids // []) | index($id)) != null) );
+    def project_of($root):
+        if ($root | startswith($home + "/Projects/")) then $root[($home + "/Projects/" | length):]
+        elif $root == $home then "~"
+        elif ($root | startswith($home + "/")) then "~" + $root[($home | length):]
+        else $root end;
+
+    ( [ ($run.unseen // [])[]
+        | . as $e
+        | ([$e.ids[] | select(acked($e.src; $e.pkg; .) | not)]) as $open
+        | ([$e.ids[] | select(acked($e.src; $e.pkg; .))]) as $ack
+        | select(($open | length) > 0)
+        | { src: $e.src, root: $e.root, project: project_of($e.root), pkg: $e.pkg,
+            version: $e.version, eco: $e.eco, sev: $e.sev, crit: (($e.sev // 0) >= 9),
+            fix: $e.fix, ids_open: $open, ids_acked: $ack,
+            anchor: $e.anchor, project_anchor: $e.project_anchor } ]
+      | sort_by([-(.sev // 0), .project, .pkg]) ) as $attention
+
+  | {
+      schema: 1,
+      hiveguard: { version: $version, method: $method },
+      now_epoch: $now,
+      scan: {
+        running: ($scan_pid != ""),
+        pid: (if $scan_pid == "" then null else ($scan_pid | tonumber) end),
+        last: (if $run == null then null
+               else $run | { ok, rc, error, started_epoch, finished_epoch, stamp, target, counts } end)
+      },
+      attention: $attention,
+      attention_ids: ([$attention[].ids_open | length] | add // 0),
+      report: { path: $report, exists: $report_exists,
+                opened_epoch: ($opened_raw | gsub("\\s"; "") | intornull) },
+      schedule: {
+        configured: $sched_configured,
+        loaded: $sched_loaded,
+        hour: ($sched_hour | intornull),
+        minute: ($sched_min | intornull),
+        folders: ($folders | lines)
+      },
+      strict: {
+        enabled: $strict_enabled,
+        hook_sourced: $hook_sourced,
+        hook_hint: (if $hook_hint == "" then null else $hook_hint end),
+        blocked: [ $markers_raw | lines[] | split("\t")
+                   | select(length >= 2 and .[1] == "active")
+                   | { root: .[0], summary: (.[2] // ""),
+                       crit_pkgs: ( (($run.roots // {})[.[0]].crit_pkgs)
+                                    // ((.[2] // "") | capture("\\((?<n>[0-9]+) critical\\)").n | tonumber)
+                                    // 0 ) } ],
+        paused: [ $pauses_raw | lines[] | split("\t")
+                  | select(length >= 2 and (.[1] | test("^[0-9]+$")) and (.[1] | tonumber) > $now)
+                  | { root: .[0], until_epoch: (.[1] | tonumber) } ]
+      },
+      app: { running: ($app_pid != "") }
+    }
+')"
+
+if [ "$json" = 1 ]; then
+  printf '%s\n' "$DOC"
+  exit 0
+fi
+
+# -- human summary (derived from the same document) ----------------------------
+jq -r '
+  .scan.last as $l
+  | ( if $l == null then "No scan has completed yet"
+      elif $l.ok then "Last scan: \($l.stamp) — ok — \($l.counts.active.projects // 0) project(s) with problems, \($l.counts.active.crit // 0) critical"
+      else "Last scan: \($l.stamp) — FAILED (rc=\($l.rc)) — \(($l.error // "") | split("\n") | map(select(length > 0)) | .[0] // "no output")"
+      end ),
+    ( if .attention_ids > 0 then "New findings: \(.attention_ids) advisory id(s) in \(.attention | length) package(s)"
+      else "New findings: none" end ),
+    ( [ (if .schedule.configured | not then "daily scan not scheduled"
+         elif .schedule.loaded | not then "agent not loaded" else empty end),
+        (if $l == null then "no scan yet"
+         else (if $l.ok | not then "last scan failed" else empty end),
+              (if $l.finished_epoch != null and (.now_epoch - $l.finished_epoch) > 129600
+               then "last scan \(((.now_epoch - $l.finished_epoch) / 3600) | floor)h ago" else empty end)
+         end) ] as $r
+      | if ($r | length) == 0 then "Protection: ok" else "Protection: NOT WORKING — \($r | join("; "))" end ),
+    ( if .strict.enabled then "Strict mode: on, \(.strict.paused | length) paused" else "Strict mode: off" end ),
+    ( if .scan.running then "Scan running: yes (pid \(.scan.pid))" else empty end )
+' <<<"$DOC"
