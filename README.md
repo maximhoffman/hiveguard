@@ -48,6 +48,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `hiveguard mark status\|on\|off\|clear\|hook` | Mark flagged project folders (Finder tag + terminal reminder). `off`/`clear` opt out; `hook` prints the line to add to `~/.zshrc`. |
 | `hiveguard strict on\|off\|status\|pause\|resume` | **Strict mode** (off by default): a project the daily scan flagged red refuses to run, build, test or install until you fix it or pause it (one project, one hour by default). Terminal-level guard only — it can't stop an IDE Run button, a double-click, Docker Desktop, or a process already running. |
 | `hiveguard doctor [--fix]` | Diagnose install/migration health (install method, PATH shadowing, obsolete `~/bin` links, the launchd agent, the shell guard, prerequisites). `--fix` applies only safe, reversible repairs. |
+| `hiveguard status [--json]` | Read-only snapshot: last scan outcome, new findings still needing attention, and protection health (scheduled? loaded? strict mode on?). `--json` prints the versioned machine-readable contract (`docs/status-json.md`) the companion menu bar app reads. |
 | `hiveguard update` | Self-update: `brew upgrade` under a brew install, or `git pull` + re-run the installer from a source checkout. |
 
 ---
@@ -267,14 +268,31 @@ packages, vulns, critical, acknowledged, and "N new" — so you can recover the 
 from a notification you missed. Flags:
 
 ```bash
-hiveguard daily --open     # just open the last report, never scan
+hiveguard daily --open                      # just open the last report, never scan
+hiveguard daily --open --at p-3f2a9c1d0b7e   # open the last report, jump straight to that project/finding
 hiveguard daily --rescan   # force a fresh scan now, no prompt
 hiveguard daily --if-due   # scan only if today's report is missing/stale (used by the scheduler)
 ```
 
+`--at <anchor>` only works together with `--open`. The anchor is one of the ids the
+report embeds on every project card (`p-…`) and finding row (`f-…`) — the same ids
+`hiveguard status --json` hands back as `anchor`/`project_anchor` on each attention
+entry — and the report scrolls to it and highlights it briefly.
+
 `hiveguard daily --probe <path>` is internal — [strict mode](#strict-mode) uses it for
 the background scan of an unknown project: it scans just that one root into
 `~/.hiveguard/osv-probe.html`, leaving the daily report and its diff baseline alone.
+
+**A failed scan never clobbers yesterday's data.** If `osv-scanner` errors out (or
+produces no output), `daily` keeps the existing report, diff baseline and Finder markers
+exactly as they were, records the failure (`ok:false`, exit code, last error lines) in
+`~/.hiveguard/osv-run.json`, logs a `FAILED` line to `osv-daily.log`, and prints `✖ scan
+failed (rc=<n>) — previous report and state kept`. No notification is sent for a failed
+run; the next successful scan picks up where the last good one left off.
+
+**Notification handoff:** while the [companion menu bar app](#companion-menu-bar-app) is
+running, `daily` skips its own notification — the app owns notifications and reads the
+same run outcome via `hiveguard status --json`.
 
 The report groups findings by project, sorted by severity, with the fixed-in version and
 osv.dev links for every advisory (theme-aware — adapts to light/dark):
@@ -529,6 +547,33 @@ alias), and boots out + removes a launchd agent that points at a missing or fore
 install. It **never** edits `~/.zshrc` and **never** removes a non-symlink file — those
 are printed as instructions for you to apply.
 
+### `hiveguard status` — machine-readable snapshot
+
+```bash
+hiveguard status          # a few lines: last scan, new findings, protection health
+hiveguard status --json   # the same facts as one versioned JSON document
+```
+
+Read-only — it never writes a file, never prunes an expired strict-mode pause, and never
+calls `launchctl` with anything but `print`. `--json` prints the schema-versioned
+contract described in [`docs/status-json.md`](docs/status-json.md): last scan
+outcome, the findings still needing attention (with report anchors for `daily --open
+--at`), whether the scheduled scan is configured and loaded, and strict mode's blocked
+and paused projects. This is the document the [companion menu bar
+app](#companion-menu-bar-app) polls.
+
+### Companion menu bar app
+
+A separate, personal repository (`hiveguard-menubar`, built from source, not
+distributed) adds a macOS menu bar icon on top of hiveguard: calm/red/yellow/scanning at
+a glance, a menu to acknowledge or pause findings, trigger a scan, or jump to the report,
+and a notification when something needs attention. It is a thin client — it reads
+`hiveguard status --json` (contract: [`docs/status-json.md`](docs/status-json.md)) and
+shells out to `hiveguard`/`bin/osv-daily` for every action; nothing in this repository
+depends on it, and `hiveguard daily`'s own per-scan notification hands off to it (steps
+aside) while its pid is alive. It is not part of this repo and not published yet — see
+the sibling checkout if you have it.
+
 ---
 
 ## Migrating from the source install to Homebrew
@@ -581,12 +626,17 @@ untouched; nothing is lost in the move.
 | `osv-daily.log` | One line per scan (counts + new/resolved). |
 | `osv-acks.json` | Your acknowledgements (advisory-scoped mutes). |
 | `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed. Override with `HIVEGUARD_STATE`. |
+| `osv-run.json` | Outcome of the last daily run that reached the scan step — ok/failed, counts, the findings new in that run and still-unseen ones carried over until the report is opened. What `hiveguard status` reads. Override `HIVEGUARD_RUN`. |
+| `osv-daily.pid` | Pid of a daily scan currently in progress; removed when the run ends. Override `HIVEGUARD_SCAN_PID`. |
+| `osv-report-opened` | Epoch timestamp of the last time the report was opened via `hiveguard daily --open`. Override `HIVEGUARD_REPORT_OPENED`. |
 | `osv-markers.tsv` | Flagged project folders — `root<TAB>status<TAB>summary`, drives Finder tags, the terminal reminder, and strict mode. |
 | `strict-pauses.tsv` | Running strict-mode pauses — `root<TAB>until_epoch`. |
 | `osv-coverage.tsv` | Which folders a scan has covered and when — `target<TAB>scanned_epoch`. How strict mode tells a never-scanned project from a known-clean one. |
 | `strict-attempts.tsv` | Debounce record for strict mode's background scans — `root<TAB>attempt_epoch`. |
 | `strict.log` | One line per strict-mode background scan. |
 | `osv-probe.html` | The report from strict mode's one-project background scan (`hiveguard daily --probe`). |
+| `menubar.pid` | Pid of the [companion menu bar app](#companion-menu-bar-app), when running — `daily`'s notification hands off to it while this is alive. Override `HIVEGUARD_APP_PID`. |
+| `menubar.log` | The companion app's own log of its background actions (fixed path, like `strict.log`). |
 | `cache/brew-releases/` | Cached `hiveguard brew` changelogs. |
 
 ---

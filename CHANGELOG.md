@@ -6,6 +6,31 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `hiveguard status [--json]` — a read-only snapshot of the last scan outcome, new
+  findings still needing attention, and protection health (scheduled, loaded, strict
+  mode). `--json` prints a versioned, machine-readable contract, documented in the new
+  `docs/status-json.md` (schema 1).
+- `~/.hiveguard/osv-run.json` — records the outcome of every daily run that reaches the
+  scan step (ok/failed, counts, new and still-unseen findings), replacing guesswork about
+  "did last night's scan actually run."
+- A scan-in-progress pid file (`~/.hiveguard/osv-daily.pid`) so other tools can tell
+  whether a daily scan is currently running.
+- A report-opened stamp (`~/.hiveguard/osv-report-opened`), updated every time `hiveguard
+  daily --open` opens the report.
+- `hiveguard daily --open --at <anchor>` — open the report and jump straight to the
+  project or finding behind a given report anchor.
+- A companion menu bar app (separate repository, not part of this project) now exists and
+  consumes `hiveguard status --json` to show scan/protection state and act on findings
+  from the menu bar.
+
+### Changed
+- A failed daily scan no longer overwrites the report, the diff baseline, or Finder
+  markers with empty results — it keeps yesterday's data, records the failure in
+  `osv-run.json`, and the interactive failed-scan warning now says so explicitly.
+- The daily scan's own per-scan notification is suppressed while the companion menu bar
+  app is running — the app owns notifications in that case.
+
 ## [1.5.0] - 2026-09-14
 
 ### Added
