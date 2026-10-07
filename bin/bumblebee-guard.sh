@@ -112,15 +112,40 @@ _bb_node_guard() {
   fi
 }
 
-npm()  { _bb_node_guard npm  "$@"; }
-pnpm() { _bb_node_guard pnpm "$@"; }
-yarn() { _bb_node_guard yarn "$@"; }
-bun()  { _bb_node_guard bun  "$@"; }
+# Helpers-only reload (see bumblebee_guard_ensure below): stop before the
+# public npm/pip/go/… definitions, so a reload never replaces a wrapper that
+# another guard (hiveguard strict mode) has put around them.
+[ -n "${BB_GUARD_HELPERS_ONLY:-}" ] && return 0
+
+# --- Shell snapshots (Claude Code) -------------------------------------------
+# Claude Code doesn't source ~/.zshrc per command: it replays a snapshot of the
+# shell's functions that drops every `_`-prefixed one and all variables. The
+# public functions below survive; the `_bb_*` helpers and BB_* settings don't.
+# So each public function first calls this loader, which re-sources this file
+# (helpers only) by its absolute path, baked in at definition time. If the file
+# is gone, it warns and the command runs unchecked instead of failing with 127.
+BB_GUARD_SELF="${BASH_SOURCE[0]:-$0}"
+case "$BB_GUARD_SELF" in /*) ;; *) BB_GUARD_SELF="$PWD/$BB_GUARD_SELF" ;; esac
+eval "bumblebee_guard_ensure() {
+  type _bb_node_guard >/dev/null 2>&1 && return 0
+  BB_GUARD_HELPERS_ONLY=1
+  . $(printf '%q' "$BB_GUARD_SELF") 2>/dev/null
+  unset BB_GUARD_HELPERS_ONLY
+  type _bb_node_guard >/dev/null 2>&1 && return 0
+  echo \"bumblebee: guard not loadable ($(printf '%q' "$BB_GUARD_SELF")), running unchecked\" >&2
+  return 1
+}"
+
+npm()  { bumblebee_guard_ensure || { command npm  "$@"; return $?; }; _bb_node_guard npm  "$@"; }
+pnpm() { bumblebee_guard_ensure || { command pnpm "$@"; return $?; }; _bb_node_guard pnpm "$@"; }
+yarn() { bumblebee_guard_ensure || { command yarn "$@"; return $?; }; _bb_node_guard yarn "$@"; }
+bun()  { bumblebee_guard_ensure || { command bun  "$@"; return $?; }; _bb_node_guard bun  "$@"; }
 
 # --- pip: pre-check via dry-run ---------------------------------------------
 # Requires pip >= 23 (--dry-run/--report). The set of packages that would be
 # installed is computed without installing, then checked against the catalog.
 pip() {
+  bumblebee_guard_ensure || { command pip "$@"; return $?; }
   if [ "${1:-}" != "install" ]; then command pip "$@"; return $?; fi
   if ! _bb_preflight; then command pip "$@"; return $?; fi
 
@@ -150,6 +175,7 @@ pip() {
 
 # --- Go: check AFTER (no install scripts; downloads are protected by go.sum) -
 go() {
+  bumblebee_guard_ensure || { command go "$@"; return $?; }
   command go "$@"; local rc=$?
   case "${1:-}" in
     get|install|mod|build)
@@ -164,6 +190,7 @@ go() {
 
 # --- Rust: bumblebee does NOT cover crates.io. Point to the right tool.
 cargo() {
+  bumblebee_guard_ensure || { command cargo "$@"; return $?; }
   case "${1:-}" in
     add|install|update|build)
       if command -v cargo-audit >/dev/null 2>&1; then

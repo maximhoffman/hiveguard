@@ -355,6 +355,34 @@ zrun "source $T/snap-gone.zsh; cd $T/proj/app; npm test; print rc=\$?"
 is "M/snapshot, guard file gone: the command still runs" 'REAL npm test
 rc=0' "$ZOUT"
 contains "M/snapshot, guard file gone: one-line warning" "$ZERR" 'running npm unchecked'
+# The bumblebee guard has the same shape (public npm/pip/go/… over `_bb_*`
+# helpers and BB_* globals) and must survive a snapshot too.
+: > "$HIVEGUARD_MARKERS"
+snapshot "source $BUMBLEBEE" "$T/snap-bbonly.zsh"
+zrun "source $T/snap-bbonly.zsh; cd $T/proj/app; npm test; print rc=\$?
+npm install left-pad; print rc=\$?"
+is "M/snapshot bumblebee-only: pass-through and install both reach npm" 'REAL npm test
+rc=0
+REAL npm install left-pad
+rc=0' "$ZOUT"
+lacks "M/snapshot bumblebee-only: no command-not-found" "$ZERR" 'command not found'
+lacks "M/snapshot bumblebee-only: helpers reloaded, not run unchecked" "$ZERR" 'running unchecked'
+# No bumblebee binary here, so its preflight speaks — proof the gate really ran.
+contains "M/snapshot bumblebee-only: the install went through bumblebee's gate" "$ZERR" 'Gate skipped'
+# Reloading bumblebee's helpers must not replace hiveguard's npm wrapper.
+zrun "source $T/snap-bb.zsh; cd $T/proj/app; npm test; print rc=\$?
+[[ \$functions[npm] == *_hiveguard_strict_gate* ]] && print still-gated"
+is "M/snapshot+bumblebee clean: runs, and the strict wrapper survives the reload" 'REAL npm test
+rc=0
+still-gated' "$ZOUT"
+mkdir -p "$T/gone"
+cp "$BUMBLEBEE" "$T/gone/bumblebee-guard.sh"
+snapshot "source $T/gone/bumblebee-guard.sh" "$T/snap-bbgone.zsh"
+rm -rf "$T/gone"
+zrun "source $T/snap-bbgone.zsh; cd $T/proj/app; npm test; print rc=\$?"
+is "M/snapshot, bumblebee file gone: the command still runs" 'REAL npm test
+rc=0' "$ZOUT"
+contains "M/snapshot, bumblebee file gone: one-line warning" "$ZERR" 'running unchecked'
 
 # =============================================================================
 if (( FAILED )); then

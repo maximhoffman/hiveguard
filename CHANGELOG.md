@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- The bumblebee install guard no longer breaks `npm`, `pnpm`, `yarn`, `bun`, `pip`,
+  `go` and `cargo` with `command not found: _bb_node_guard` (exit 127) in Claude
+  Code's Bash tool. Same cause as the strict-mode fix in 1.6.1: each guarded
+  command now re-loads the guard's helpers by absolute path when a shell snapshot
+  lost them (without replacing a strict-mode wrapper around it), and warns and
+  runs unchecked if the guard file is gone. Restart open Claude Code sessions to
+  pick this up.
+
 ## [1.6.1] - 2026-10-07
 
 ### Fixed
