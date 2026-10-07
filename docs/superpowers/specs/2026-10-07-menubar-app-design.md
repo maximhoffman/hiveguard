@@ -2,6 +2,10 @@
 
 Status: approved (product), ready for task breakdown
 Date: 2026-10-07
+Revision (same day): the app moves to its own repository
+(`/Users/mh/Projects/Develop/hiveguard-menubar`); `hiveguard status --json` becomes
+an explicitly versioned cross-repo contract owned by hiveguard (`docs/status-json.md`).
+Product decisions are unchanged.
 
 ## Problem
 
@@ -24,9 +28,15 @@ with buttons.
 - Confirmations only where a wrong click costs something (criticals, strict off).
 - While the app runs, it is the only thing that notifies, and it notifies only on
   the two transitions that matter.
-- Launches at login. Behaves honestly when the engine is broken or missing.
+- Launches at login. Behaves honestly when the engine is broken, missing, or of an
+  incompatible version.
 - hiveguard remains the single source of truth: every mutation goes through the
   `hiveguard` CLI; the app never edits a state file the CLI owns.
+- Two repositories, one contract: the app lives in its own repo
+  (`/Users/mh/Projects/Develop/hiveguard-menubar`, a sibling of the hiveguard
+  checkout) and talks to hiveguard only through the CLI. The one machine-readable
+  interface between them (`hiveguard status --json`) is explicitly versioned and
+  owned by hiveguard (section 2.5).
 
 ## Non-goals (explicitly out of scope)
 
@@ -78,13 +88,22 @@ fixtures.
 | `report.opened_epoch` | `~/.hiveguard/osv-report-opened` (new, section 2.3); `null` when absent |
 | `schedule.configured`, `schedule.loaded`, hour/minute, folders | the launchd plist + `launchctl print` |
 | `strict.enabled`, `strict.hook_sourced`, `strict.blocked[]`, `strict.paused[]` | config, `~/.zshrc`, markers, pauses |
-| `cli_ok` (app-local) | the `status --json` call itself succeeded and parsed |
+| `cli_ok` (app-local) | the `status --json` call succeeded, parsed, and its `schema` is in the app's supported range |
+| `hiveguard.version` | `hiveguard version` (shown in the menu footer; makes a version mismatch visible) |
 
 ### 1.2 Icon state (evaluated in this order; first match wins)
 
-1. **CLI broken** → **yellow**, reason `hiveguard unavailable`: the `hiveguard`
-   binary cannot be found, exits non-zero, or emits unparsable JSON. Protection
-   state is unknown; unknown is reported as not working.
+1. **CLI broken or incompatible** → **yellow**, with one of these reasons
+   (protection state is unknown; unknown is reported as not working):
+   - `hiveguard not found` — no binary at any of the lookup paths (section 4.3);
+   - `hiveguard is too old` — the installed hiveguard has no `status` subcommand
+     (the dispatcher exits 2 with `unknown command: status`); the menu names the
+     minimum version (the release that ships `status`);
+   - `unsupported status format N` — the document's `schema` is missing or outside
+     the range the app supports (section 2.5); the menu says whether to update
+     hiveguard or the app;
+   - `cannot read hiveguard status` — any other non-zero exit, timeout, or
+     unparsable output.
 2. **Scanning** → **animated**: `scan.running` is true, or the app's own
    *Check now* process is still running.
 3. **Red** → `attention` is non-empty **and**
@@ -146,6 +165,9 @@ since last scan" number is unchanged.
 | Strict pause expires while the menu is open | pauses are filtered by `now` on every `status` call; the 60 s refresh updates the list |
 | `strict on` but hook not sourced | strict section shows "on, but the terminal hook is not loaded" with the line to add (text from `strict status`); not a yellow condition (strict is optional) |
 | hiveguard installed via brew later | the CLI lookup order (section 4.3) finds the brew binary; nothing else changes |
+| hiveguard updated to a release that bumps the `status` schema | yellow "unsupported status format" naming both versions, until the app is rebuilt from a matching app-repo commit |
+| app rebuilt against a newer schema than the installed hiveguard emits | same yellow, worded the other way ("update hiveguard") |
+| hiveguard rolled back to a version without `status` | yellow "hiveguard is too old" |
 
 ---
 
@@ -240,11 +262,31 @@ schedule plist (`HIVEGUARD_SCHED_PLIST`), `launchctl print gui/<uid>/<label>`
 (label `com.hiveguard.osv-daily`), config, `~/.zshrc` (hook line, same grep as
 `strict-mode`), markers, pauses, the report path.
 
-`--json` emits exactly:
+**This document is the cross-repo contract.** hiveguard owns it; the normative,
+versioned description lives in the hiveguard repo at `docs/status-json.md` (field
+table, compatibility rule, schema history) and is kept in step with `bin/status`
+in the same commit. The app repo never redefines it — it links to that file.
+
+Compatibility rule:
+
+- `schema` is an integer. **Additive** changes (a new key anywhere, a new value in
+  an existing field) keep the number. **Breaking** changes (a key removed,
+  renamed, retyped, or a change of meaning) bump it.
+- The app declares the schema range it supports (initially exactly `1`). A
+  document whose `schema` is missing or outside that range is **not** interpreted:
+  the app shows yellow "unsupported status format" (section 1.2) and tells the
+  user which side to update. The app ignores keys it does not know.
+- A hiveguard without the `status` subcommand is detected by the dispatcher's
+  `unknown command: status` on stderr with exit 2 → yellow "hiveguard is too old".
+- `hiveguard.version` in the document is what the menu shows in its footer
+  (`hiveguard v1.6.0 (git)`), so a mismatch is visible at a glance.
+
+`--json` emits exactly (schema 1):
 
 ```json
 {
   "schema": 1,
+  "hiveguard": { "version": "v1.5.0-3-gabc1234", "method": "git" },
   "now_epoch": 1791400000,
   "scan": { "running": false, "pid": null,
             "last": { "ok": true, "rc": 1, "error": null, "started_epoch": 0, "finished_epoch": 0,
@@ -275,7 +317,8 @@ schedule plist (`HIVEGUARD_SCHED_PLIST`), `launchctl print gui/<uid>/<label>`
   (filtered in output only). `hook_hint` = the `source "…"` line when the hook is
   not sourced (same resolution as `strict-mode`'s `hook_script_path`).
 - `schedule.loaded` = `launchctl print` succeeds for the label. `app.running` =
-  menubar pid alive.
+  menubar pid alive. `hiveguard.version`/`method` = what `hiveguard version` and
+  `install_method` print (`git` | `brew` | `unknown`).
 - Plain `hiveguard status` prints a short human summary (last scan line, new
   findings count, protection status, strict on/off + pauses). Not used by the app.
 
@@ -399,28 +442,39 @@ descending.
 
 ### 4.1 Location, build, run
 
-- Source lives in the repo under `app/` (one codebase, versioned with the engine
-  it talks to): `app/Package.swift` (one executable target `HiveGuard`, one test
-  target, no third-party dependencies), `app/Sources/HiveGuard/…`,
-  `app/Tests/HiveGuardTests/…` with JSON fixtures, `app/Resources/Info.plist`,
-  `app/Makefile`.
+- The app is its **own git repository**: `/Users/mh/Projects/Develop/hiveguard-menubar`
+  (local, branch `main`, no remote unless asked later), a sibling of the hiveguard
+  checkout. Nothing of the app — sources, Makefile, fixtures, ignore rules — lives in
+  the hiveguard repo, and nothing in the app assumes the hiveguard repo is next to
+  it at runtime (only the tests do, via an env var, section 9). Layout:
+  `Package.swift` (library target `HiveGuardCore` with the pure logic, executable
+  target `HiveGuard`, one test target, no third-party dependencies), `Sources/…`,
+  `Tests/HiveGuardCoreTests/Fixtures/*.json`, `Resources/Info.plist`, `Makefile`,
+  `tests/e2e.test.sh`, `README.md`, `.gitignore` (`.build/`, `dist/`, `.DS_Store`).
+- The design spec and the implementation plan stay in the hiveguard repo
+  (`docs/superpowers/specs/2026-10-07-menubar-app-design.md`,
+  `docs/superpowers/plans/2026-10-07-menubar-app-plan.md`) because they span both
+  repos; the app's README points to them and to the contract (`docs/status-json.md`)
+  by sibling path (`../hiveguard/docs/…`).
 - SwiftUI + SPM, Swift 6 toolchain from Xcode (present: Xcode 26.3, Swift 6.2),
   deployment target macOS 14. Build via `swift build -c release`.
 - An `.app` bundle is mandatory, not optional: `UNUserNotificationCenter`
   aborts the process when run outside a bundle, and `SMAppService` registers a
   bundle. SPM does not produce bundles, so `make app` assembles
-  `app/dist/HiveGuard.app` (`Contents/MacOS/HiveGuard`, `Contents/Info.plist`
+  `dist/HiveGuard.app` (`Contents/MacOS/HiveGuard`, `Contents/Info.plist`
   with `CFBundleIdentifier com.hiveguard.menubar`, `LSUIElement true`,
-  `CFBundleVersion` from `git describe`), then ad-hoc signs it
+  `CFBundleVersion` from `git describe` of the app repo), then ad-hoc signs it
   (`codesign --force --sign - --deep`). `make install` copies it to
   `~/Applications/HiveGuard.app` (a stable path: the login-item registration is
   tied to the bundle's location) and relaunches it. `make run` runs the
-  installed bundle; `make test` runs `swift test`.
-- `swift` and `make` are strict-intercepted names. The repo is not flagged
-  today; should it ever go red, `make app` is refused like any build — pause the
-  repo (`hiveguard strict pause`) as for any project. Document this in `app/README`.
-- The formula's `libexec.install "bin", "launchd", …` is unaffected (`app/` is
-  not shipped). `.gitignore` gains `app/.build/` and `app/dist/`.
+  installed bundle; `make test` runs `swift test`; `make e2e` builds the bundle
+  and runs the end-to-end test against a hiveguard checkout (section 9).
+- `swift` and `make` are strict-intercepted names. The app repo sits under the
+  scheduled `~/Projects`, so strict treats it as known-clean and the build runs;
+  should it ever go red, `make app` is refused like any build — pause it
+  (`hiveguard strict pause`) as for any project. Document this in the README.
+- hiveguard's Homebrew formula and `install.sh` are unaffected: the app is never
+  shipped by hiveguard.
 
 ### 4.2 Architecture
 
@@ -459,8 +513,13 @@ descending.
 
 Lookup order, first existing wins: `$HIVEGUARD_BIN` (existing override, tests);
 `~/bin/hiveguard`; `/opt/homebrew/bin/hiveguard`; `/usr/local/bin/hiveguard`.
-Nothing found → icon state 1 (yellow, "hiveguard unavailable"), menu shows the
-paths tried and an *Open README* item; all actions disabled.
+The app never looks relative to its own location or to any source checkout — it
+must work whether hiveguard was installed from source or via brew, and wherever
+the app bundle sits. Nothing found → icon state 1 (yellow, "hiveguard not
+found"), menu shows the paths tried and an *Open README* item; all actions
+disabled. Found but too old / incompatible → the corresponding yellow reason of
+section 1.2, with *Open report* still offered when the report file exists (it is
+a plain file; opening it needs no contract).
 
 ---
 
@@ -524,8 +583,10 @@ action ("Mark as known", "Pause 2 hours", "Turn off"); Escape cancels.
 
 | Failure | Behaviour |
 |---|---|
-| `hiveguard` not found | yellow "hiveguard unavailable"; actions disabled; paths tried in a submenu |
-| `status --json` exit ≠ 0 or invalid JSON | yellow "cannot read hiveguard status"; last good status kept for the menu with a "stale" marker; stderr tail logged to `~/.hiveguard/menubar.log` |
+| `hiveguard` not found | yellow "hiveguard not found"; actions disabled; paths tried in a submenu |
+| `status` subcommand missing (exit 2, `unknown command: status`) | yellow "hiveguard is too old — needs the release that ships `hiveguard status`"; only *Open report* and *Quit* enabled |
+| `schema` missing or unsupported | yellow "unsupported status format N (app supports 1)"; the menu says "update hiveguard" when N < supported, "rebuild the app" when N > supported; only *Open report* and *Quit* enabled |
+| `status --json` exit ≠ 0 (other) or invalid JSON | yellow "cannot read hiveguard status"; last good status kept for the menu with a "stale" marker; stderr tail logged to `~/.hiveguard/menubar.log` |
 | `status --json` times out (30 s) | same as above; process killed |
 | An action (ack/strict/open/doctor) exits ≠ 0 | `NSAlert` titled with the action, informative text = stderr (or stdout) tail; status refreshed anyway |
 | `daily --rescan` exits 2 (no folders) | alert "No folders to scan — set up the schedule: hiveguard schedule on --hour 10 ~/Projects" |
@@ -575,23 +636,41 @@ a plist under the temp HOME; `HIVEGUARD_TOOL_PATH` points at a stub dir):**
 - Existing `strict-integration.test.sh` keeps passing (adds the new env
   overrides to its scaffold so nothing leaks).
 
-**App side (`swift test` in `app/`):**
+**App side (`swift test` in the app repo):**
 
 - Pure-function tests for `IconState` from fixture JSON + injected `Date`: every
   row of the section 1.5 table, the red-before-yellow precedence, the 36 h
-  boundary (35 h 59 min vs 36 h 01 min), count arithmetic with partial acks.
+  boundary (35 h 59 min vs 36 h 01 min), count arithmetic with partial acks, the
+  three compatibility failures (not found / too old / unsupported schema).
 - Confirmation-rule tests for each row of section 6 and the no-confirm cases.
 - Notification-rule tests: transitions that fire / don't fire, dedupe key,
   count-increase fires, count-decrease does not.
 - Decoder tests: the section 2.5 document, `null` `scan.last`, unknown fields
-  ignored.
+  ignored, `schema` 0 / 2 / missing rejected with the specific error.
 
-**End to end (bash, optional in `run.sh` behind a `HIVEGUARD_APP_BIN`
-variable so the suite still runs without a built app):** seed a temp HOME with
-fixtures, run `HiveGuard --dump-state` with `HIVEGUARD_BIN=$REPO/bin/hiveguard`
-and the overrides, assert the one-line JSON (`red 6`, `yellow schedule-off`,
-`scanning`). No status item, no notifications, no login item are created in this
-mode.
+**Keeping the app's fixtures honest (the two repos version separately):** the
+fixtures are hand-written JSON and would drift silently from the real CLI. The
+app repo's end-to-end test (`tests/e2e.test.sh`, also `make e2e`) therefore runs
+against a **real hiveguard checkout** given by `HIVEGUARD_REPO` (default: the
+sibling `../hiveguard` of the app repo; the test fails loudly if
+`$HIVEGUARD_REPO/bin/status` is missing). It seeds a temp HOME with hiveguard's
+stub-scanner scaffold, produces `osv-run.json` with the real `osv-daily`, calls
+the real `hiveguard status --json`, and asserts (a) `schema` equals the one every
+fixture carries, and (b) the set of key paths of the real document equals the set
+in the richest fixture (`red-6.json`, which has attention, blocked and paused
+entries) — structural equality, values may differ. A fixture that goes stale
+fails this test. The same test drives `HiveGuard --dump-state` (built by `make
+app`) with `HIVEGUARD_BIN=$HIVEGUARD_REPO/bin/hiveguard` and the overrides, and
+asserts the one-line JSON (`red 1`, `calm` after opening, `yellow` with the
+agent stub down, `scanning` with a live pid, `yellow` on `STUB_FAIL`, red clears
+after a real `hiveguard ack`, rc 3 and yellow with `HIVEGUARD_BIN=/nonexistent`).
+No status item, no notifications, no login item are created in this mode.
+
+The hiveguard repo's own suite never needs the app: its tests cover the engine
+side (run file, pid files, stamp, handoff, `status`, anchors). The contract doc
+`docs/status-json.md` is the hinge: a change to `bin/status` that alters the
+document must update that file and, if breaking, bump `schema` — and the app's
+e2e test will go red until the app's fixtures and supported range follow.
 
 **Manual checklist (once, by the maintainer, after `make install`):** icon in
 all four states (force each by editing files in a *temp* HOME and launching the
@@ -603,24 +682,43 @@ is suppressed while the app runs and returns after *Quit*.
 
 ## 10. Docs and housekeeping (part of the work, not optional)
 
+hiveguard repo:
+
 - README: `hiveguard status` in the subcommand table; the new files in "Where
   hiveguard keeps its data"; the failed-scan behaviour in the `daily` section;
-  a short "Menu bar app (build from source)" section pointing at `app/README`.
-- `app/README.md`: build/install/run/test, the strict-intercepts-`swift` note,
-  the ad-hoc-signing caveat for Login Items.
-- `CHANGELOG.md` under `## [Unreleased]`: `status` subcommand, `osv-run.json`,
-  scan pid file, opened stamp, notification handoff, `--open --at`, report
-  anchors, failed-scan no longer overwrites report/baseline/markers.
+  a short "Companion menu bar app" paragraph: separate repository
+  (`hiveguard-menubar`, built from source, personal), what it reads (`hiveguard
+  status --json`), that notifications hand over while it runs.
+- `docs/status-json.md` (new): the normative contract — field table, types,
+  null-ability, the compatibility rule, schema history (`1 — initial`).
+- `CHANGELOG.md` under `## [Unreleased]`: **hiveguard-side changes only** —
+  `status` subcommand + contract doc, `osv-run.json`, scan pid file, opened stamp,
+  notification handoff, `--open --at`, report anchors, failed-scan no longer
+  overwrites report/baseline/markers — plus one line that a companion menu bar app
+  exists in its own repository and consumes `status --json`.
 - Dispatcher help block (`bin/hiveguard`) gains the `status` line; `bin/osv-daily`
   header documents `--at` and the new files.
+
+app repo:
+
+- `README.md`: what it is and what it is not (personal build, ad-hoc signed, not
+  distributed), build/install/run/test/e2e, the `HIVEGUARD_REPO` variable, the
+  strict-intercepts-`swift` note, the ad-hoc-signing caveat for Login Items, the
+  supported `status` schema range, and links by sibling path to the spec, the
+  plan and the contract in the hiveguard repo.
 
 ## Implementation notes for the breakdown
 
 - Engine changes are small and surgical: `bin/osv-daily` (pid file, run.json,
   unseen, anchors + hash script, `--at`, failure path, notifier gate,
-  `HIVEGUARD_TOOL_PATH`), new `bin/status`, one `case` line in `bin/hiveguard`.
-  No change to `osv-ack`, `strict-mode`, `daily-schedule`, `doctor`, the zsh
-  hooks, or any state file format that exists today.
+  `HIVEGUARD_TOOL_PATH`), new `bin/status` + `docs/status-json.md`, one `case`
+  line in `bin/hiveguard`. No change to `osv-ack`, `strict-mode`,
+  `daily-schedule`, `doctor`, the zsh hooks, or any state file format that
+  exists today.
+- Two repos: hiveguard work on a feature branch of the hiveguard checkout; the
+  app in the new sibling repo on `main`. Tasks in different repos never conflict
+  on files. The hiveguard side must land first in each wave that the app's
+  end-to-end test depends on, since that test runs against the sibling checkout.
 - bash 3.2: no associative arrays; guard empty arrays under `set -u`; BSD `date`
   (`date -r`), `awk`, `sed`. No `timeout` in tests — poll with `sleep 1`.
 - `status` must stay read-only even where `strict status` is not (it prunes
