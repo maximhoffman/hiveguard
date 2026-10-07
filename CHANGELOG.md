@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-07
+
 ### Added
 - `hiveguard status [--json]` — a read-only snapshot of the last scan outcome, new
   findings still needing attention, and protection health (scheduled, loaded, strict
@@ -175,7 +177,11 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/maximhoffman/hiveguard/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/maximhoffman/hiveguard/compare/v1.4.1...v1.5.0
+[1.4.1]: https://github.com/maximhoffman/hiveguard/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/maximhoffman/hiveguard/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/maximhoffman/hiveguard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/maximhoffman/hiveguard/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/maximhoffman/hiveguard/compare/v1.0.1...v1.1.0
