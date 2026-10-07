@@ -40,8 +40,20 @@
 # background: it never prompts, writes its report to ~/.hiveguard/osv-probe.html,
 # leaves the daily report and the osv-last-scan.json baseline untouched, and
 # still syncs that root's folder marker and its coverage row.
+#
+# Every non-probe run that reaches the scan step records its outcome in
+# ~/.hiveguard/osv-run.json (override: HIVEGUARD_RUN): ok/failed, counts, the
+# advisories new in this run and the "unseen" ones carried over until the report
+# is opened — the file the menu bar app reads (via `hiveguard status`).
+# While the scanner runs, ~/.hiveguard/osv-daily.pid (override: HIVEGUARD_SCAN_PID)
+# holds this run's pid; it is removed when the run ends.
+# Notifier handoff: while the menu bar app is running (live pid in
+# ~/.hiveguard/menubar.pid, override: HIVEGUARD_APP_PID) the app notifies and
+# this script skips terminal-notifier; otherwise it notifies as always.
+# A failed scan (scanner error or no output) records ok:false with the error,
+# logs a FAILED line and keeps the previous report, baseline and markers.
 set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export PATH="${HIVEGUARD_TOOL_PATH:+$HIVEGUARD_TOOL_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 # --- argument parsing ------------------------------------------------------
 print_header() {
@@ -114,6 +126,10 @@ for _d in "${EXCLUDE_DIRS[@]}"; do EXCLUDE_ARGS+=(--experimental-exclude "$_d");
 REPORT="$HOME/.hiveguard/osv-projects.html"
 STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
 COVERAGE="${HIVEGUARD_COVERAGE:-$HOME/.hiveguard/osv-coverage.tsv}"
+RUN="${HIVEGUARD_RUN:-$HOME/.hiveguard/osv-run.json}"
+SCAN_PID="${HIVEGUARD_SCAN_PID:-$HOME/.hiveguard/osv-daily.pid}"
+OPENED="${HIVEGUARD_REPORT_OPENED:-$HOME/.hiveguard/osv-report-opened}"
+APP_PID="${HIVEGUARD_APP_PID:-$HOME/.hiveguard/menubar.pid}"
 # A probe writes its own report and never reads or writes the daily baseline.
 [ "$probe_flag" = 1 ] && REPORT="$HOME/.hiveguard/osv-probe.html"
 
@@ -170,7 +186,10 @@ fi
 
 ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
 JSON="$(mktemp)"; COUNTS="$(mktemp)"; MARKS="$(mktemp)"; ERRFILE="$(mktemp)"
-trap 'rm -f "$JSON" "$COUNTS" "$MARKS" "$ERRFILE"' EXIT
+# The scan pid file is removed only when it still names THIS run, so an early
+# exit can never delete the pid file of another, still-running scan.
+trap 'rm -f "$JSON" "$COUNTS" "$MARKS" "$ERRFILE"
+      [ "$probe_flag" = 1 ] || { [ "$(cat "$SCAN_PID" 2>/dev/null)" = "$$" ] && rm -f "$SCAN_PID"; } || true' EXIT
 LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
 STAMP="$(date '+%Y-%m-%d %H:%M')"
 
@@ -219,12 +238,20 @@ for _t in "${TARGETS[@]}"; do CANON_TARGETS+=("$(canon_path "$_t")"); done
 SCAN_TARGETS=""
 [ "${#CANON_TARGETS[@]}" -gt 0 ] && SCAN_TARGETS="$(printf '%s\n' "${CANON_TARGETS[@]}")"
 
+# Scan in progress: a non-probe run records its pid right before the scanner
+# starts (the EXIT trap removes it) and notes the start time for osv-run.json.
+STARTED="$(date +%s)"
+if [ "$probe_flag" = 0 ]; then
+  mkdir -p "$(dirname "$SCAN_PID")" 2>/dev/null || true
+  printf '%s' "$$" > "$SCAN_PID" 2>/dev/null || true
+fi
+
 # one scan over all target folders (with the default exclusions applied).
 # In an interactive terminal (stdout AND stderr are both TTYs) show a single,
 # self-overwriting progress line on stderr while osv-scanner walks the tree, and
 # surface a real scanner failure instead of the silent 0 it would otherwise
-# become. Non-interactive runs (launchd, pipes, any redirect) are byte-for-byte
-# identical to before: silent, stderr discarded, exit code swallowed.
+# become. Non-interactive runs (launchd, pipes, any redirect) stay silent, but
+# their stderr is captured too, so a failure can be recorded (see below).
 SHOW_PROGRESS=0
 { [ -t 1 ] && [ -t 2 ]; } && SHOW_PROGRESS=1
 [ "$probe_flag" = 1 ] && SHOW_PROGRESS=0   # a background probe animates nothing
@@ -262,7 +289,7 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
     grep -v '^Scanned ' "$ERRFILE" 2>/dev/null | tail -5 >&2 || true
   fi
 else
-  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>/dev/null || scan_rc=$?
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>"$ERRFILE" || scan_rc=$?
 fi
 # Did the scanner actually produce results? osv-scanner exits 1 when it FOUND
 # vulnerabilities (not an error) and >1 on a real failure (e.g. 128 = no package
@@ -270,6 +297,49 @@ fi
 # a failure into a "0 results" report — coverage must not record that as a scan.
 SCAN_OK=0
 { [ -s "$JSON" ] && { [ "$scan_rc" = 0 ] || [ "$scan_rc" = 1 ]; }; } && SCAN_OK=1
+
+# Failed scan (non-probe): record it in osv-run.json and keep everything else —
+# a "0 results" report would overwrite the diff baseline and clear the markers,
+# so the next good scan would report every finding as new. No report, state,
+# markers, coverage or notification; exit 0 so launchd sees no crash loop.
+if [ "$probe_flag" = 0 ] && [ "$SCAN_OK" = 0 ]; then
+  _first_err="$(RUN="$RUN" ERRFILE="$ERRFILE" SCAN_RC="$scan_rc" STARTED="$STARTED" \
+    STAMP="$STAMP" TARGET="$TARGET_STR" python3 <<'PYEOF' 2>/dev/null
+import json, os, time
+run = os.environ["RUN"]
+try:
+    with open(os.environ["ERRFILE"], errors="replace") as f:
+        lines = [l.rstrip("\n") for l in f]
+except Exception:
+    lines = []
+lines = [l for l in lines if l.strip() and not l.startswith("Scanned ")][-5:]
+prev = None
+try:
+    with open(run) as f:
+        prev = json.load(f)
+except Exception:
+    prev = None
+unseen = (prev.get("unseen") if isinstance(prev, dict) else None) or []
+doc = {
+    "schema": 1, "ok": False, "rc": int(os.environ["SCAN_RC"]),
+    "error": "\n".join(lines) if lines else None,
+    "started_epoch": int(os.environ["STARTED"]), "finished_epoch": int(time.time()),
+    "stamp": os.environ["STAMP"], "target": os.environ["TARGET"],
+    "counts": None, "roots": None, "new": [], "unseen": unseen,
+}
+os.makedirs(os.path.dirname(run) or ".", exist_ok=True)
+tmp = run + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(doc, f, indent=2)
+os.replace(tmp, run)
+print(lines[0] if lines else "no output")
+PYEOF
+  )" || true
+  [ -n "$_first_err" ] || _first_err="no output"
+  echo "[$STAMP] FAILED rc=$scan_rc ($_first_err)" >> "$LOGDIR/osv-daily.log"
+  echo "✖ scan failed (rc=$scan_rc) — previous report and state kept"
+  exit 0
+fi
 [ -s "$JSON" ] || { echo '{"results":[]}' > "$JSON"; }
 
 # A probe must leave the daily baseline alone: with STATE empty python neither
@@ -278,8 +348,8 @@ SCAN_OK=0
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" python3 <<'PYEOF'
-import json, os, html, re, shlex
+JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" python3 <<'PYEOF'
+import json, os, html, re, shlex, hashlib, time
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
     return os.environ.get(k, dv)
@@ -887,6 +957,81 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 }})();
 </script>'''
 open(os.environ["OUT"], "w").write(page)
+
+# --- run outcome file (non-probe only: STATE is empty under --probe) --------
+# `new` = this run's new advisory ids per active package fragment; `unseen` =
+# `new` plus the previous run's unseen ids still present in this scan, carried
+# over only while the report has not been opened since that previous run. Acks
+# are NOT applied here — `hiveguard status` applies them live.
+def h12(s):
+    return hashlib.sha1(s.encode()).hexdigest()[:12]
+
+if sf:
+    run_path = os.environ.get("RUN", "")
+    all_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
+    this_run_new = []
+    for pr in active:
+        for p in pr["pkgs"]:
+            if not p["new_ids"]:
+                continue
+            this_run_new.append({
+                "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
+                "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
+                "ids": list(p["new_ids"]),
+                "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
+                "project_anchor": "p-" + h12(pr["src"]),
+            })
+    prev_run = None
+    try:
+        with open(run_path) as f:
+            prev_run = json.load(f)
+    except Exception:
+        prev_run = None
+    if not isinstance(prev_run, dict):
+        prev_run = None
+    try:
+        with open(os.environ.get("OPENED", "")) as f:
+            opened = int(f.read().strip())
+    except Exception:
+        opened = 0
+    try:
+        prev_finished = int(prev_run.get("finished_epoch", 0) or 0) if prev_run else 0
+    except Exception:
+        prev_finished = 0
+    carry = (prev_run.get("unseen") or []) if prev_run and opened < prev_finished else []
+    merged = {}
+    for e in carry:
+        if not isinstance(e, dict):
+            continue
+        ids = [i for i in (e.get("ids") or []) if (e.get("src"), e.get("pkg"), i) in all_keys]
+        if ids:
+            merged[(e.get("src"), e.get("pkg"))] = {**e, "ids": ids}
+    for n in this_run_new:                    # this run's metadata wins, ids unioned
+        k = (n["src"], n["pkg"]); m = merged.get(k)
+        merged[k] = n if m is None else {**n, "ids": sorted(set(m["ids"]) | set(n["ids"]))}
+    def order(e):
+        try: sv = float(e.get("sev") or 0)
+        except Exception: sv = 0.0
+        return (-sv, e.get("src") or "", e.get("pkg") or "")
+    unseen = sorted(merged.values(), key=order)
+    this_run_new.sort(key=order)
+    roots = {r: {"status": "active" if e["has_active"] else "acked",
+                 "active_vulns": e["av"], "crit_pkgs": e["ac"], "acked_vulns": e["kv"]}
+             for r, e in root_agg.items()}
+    run_doc = {
+        "schema": 1, "ok": True, "rc": int(os.environ.get("SCAN_RC", "0") or 0), "error": None,
+        "started_epoch": int(os.environ.get("STARTED", "0") or 0),
+        "finished_epoch": int(time.time()),
+        "stamp": ig("STAMP"), "target": ig("TARGET"),
+        "counts": state["counts"], "roots": roots,
+        "new": this_run_new, "unseen": unseen,
+    }
+    if run_path:
+        os.makedirs(os.path.dirname(run_path) or ".", exist_ok=True)
+        tmp = run_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(run_doc, f, indent=2)
+        os.replace(tmp, run_path)
 PYEOF
 
 # active/acked counts computed by python (notification + log use the ACTIVE ones)
@@ -932,8 +1077,11 @@ log_kind=""; [ "$probe_flag" = 1 ] && log_kind="probe "
 
 echo "[$STAMP] ${log_kind}projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS)$mark_log → $REPORT" >> "$LOGDIR/osv-daily.log"
 
-# notification only on ACTIVE (non-acknowledged) findings
-if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && command -v terminal-notifier >/dev/null; then
+# notification only on ACTIVE (non-acknowledged) findings — and only when the
+# menu bar app is not running (it owns notifications while its pid is live; a
+# stale pid after a crash fails kill -0, so we fall back to notifying).
+app_running() { [ -f "$APP_PID" ] && kill -0 "$(cat "$APP_PID" 2>/dev/null)" 2>/dev/null; }
+if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && ! app_running && command -v terminal-notifier >/dev/null; then
   terminal-notifier -title "osv-daily: vulnerabilities found" \
     -message "$ACTIVE_PROJECTS project(s), $ACTIVE_PKGS package(s), $ACTIVE_VULNS total ($ACTIVE_CRIT critical)$new_suffix" \
     -open "file://$REPORT" -sender com.apple.Terminal 2>/dev/null || true

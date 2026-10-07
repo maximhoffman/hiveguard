@@ -84,6 +84,10 @@ export HIVEGUARD_COVERAGE="$HOME/.hiveguard/osv-coverage.tsv"
 export HIVEGUARD_STRICT_ATTEMPTS="$HOME/.hiveguard/strict-attempts.tsv"
 export HIVEGUARD_STATE="$HOME/.hiveguard/osv-last-scan.json"
 export HIVEGUARD_ACKS="$HOME/.hiveguard/osv-acks.json"
+export HIVEGUARD_RUN="$HOME/.hiveguard/osv-run.json"
+export HIVEGUARD_SCAN_PID="$HOME/.hiveguard/osv-daily.pid"
+export HIVEGUARD_REPORT_OPENED="$HOME/.hiveguard/osv-report-opened"
+export HIVEGUARD_APP_PID="$HOME/.hiveguard/menubar.pid"
 export HIVEGUARD_SCHED_PLIST="$T/no-such.plist"   # never the real launchd plist
 printf 'mark_finder=0\n' > "$HIVEGUARD_CONFIG"    # no Finder xattr/python calls
 
@@ -246,6 +250,7 @@ printf 'mark_finder=0\n' > "$T/fresh-config"
 fresh_env() {
   env -u HIVEGUARD_MARKERS -u HIVEGUARD_PAUSES -u HIVEGUARD_COVERAGE \
       -u HIVEGUARD_STRICT_ATTEMPTS -u HIVEGUARD_STATE -u HIVEGUARD_ACKS \
+      -u HIVEGUARD_RUN -u HIVEGUARD_SCAN_PID -u HIVEGUARD_REPORT_OPENED -u HIVEGUARD_APP_PID \
       HOME="$H2" HIVEGUARD_CONFIG="$T/fresh-config" \
       HIVEGUARD_SCHED_PLIST="$T/no-such.plist" PATH="$T/stubs:$PATH" "$@"
 }
@@ -260,7 +265,7 @@ fresh_env "$HG" daily "$T/proj" >/dev/null 2>&1 </dev/null
 unexpected=""
 for f in $(ls -A "$H2/.hiveguard" 2>/dev/null); do
   case "$f" in
-    osv-projects.html|osv-daily.log|osv-last-scan.json|osv-markers.tsv|osv-coverage.tsv|osv-acks.json) ;;
+    osv-projects.html|osv-daily.log|osv-last-scan.json|osv-markers.tsv|osv-coverage.tsv|osv-acks.json|osv-run.json) ;;
     *) unexpected="$unexpected $f" ;;
   esac
 done
