@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-07
+
 ### Fixed
 - Strict mode no longer breaks every wrapped command (`npm`, `python3`, `swift`, …)
   with `command not found: _hiveguard_strict_gate` (exit 127) in Claude Code's
@@ -186,7 +188,8 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/maximhoffman/hiveguard/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/maximhoffman/hiveguard/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/maximhoffman/hiveguard/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/maximhoffman/hiveguard/compare/v1.4.0...v1.4.1
