@@ -22,10 +22,12 @@
 # How it intercepts: for every name in $_HIVEGUARD_STRICT_CMDS (plus the config
 # key `strict_commands_extra=a b c`) it installs a shell function that calls the
 # gate first and the original second. An already-defined function — the bumblebee
-# guard's npm/pnpm/yarn/bun/pip/go/cargo — is preserved as
-# `_hiveguard_strict_orig_<cmd>` and still runs, so the two guards compose in
-# EITHER source order: the precmd sync re-wraps when bumblebee loads last, and
-# `strict off` restores bumblebee's function body byte-for-byte.
+# guard's npm/pnpm/yarn/bun/pip/go/cargo — still runs (its body is carried inline
+# after the gate, and a copy is kept as `_hiveguard_strict_orig_<cmd>`), so the
+# two guards compose in EITHER source order: the precmd sync re-wraps when
+# bumblebee loads last, and `strict off` restores bumblebee's function body
+# byte-for-byte. The wrappers also work in a shell snapshot that lost the gate
+# (Claude Code's Bash tool): they re-source this file by absolute path.
 #
 # Rules the gate applies, in order, for the current directory:
 #   1. strict off                         → run (nothing else is read)
@@ -142,16 +144,29 @@ if [[ -z ${_HIVEGUARD_STRICT_LOADED:-} ]]; then
   }
 
   # $1 = command name. Install the wrapper, preserving any existing function.
+  #
+  # The wrapper is self-sufficient: a shell snapshot (Claude Code replays the
+  # shell's functions instead of sourcing ~/.zshrc, dropping every `_`-prefixed
+  # name and all globals) keeps `npm` but loses the gate, its state and any
+  # `_hiveguard_strict_orig_*` copy. So the wrapper (re)sources this file by
+  # absolute path when the gate is missing, warns and runs if that file is gone,
+  # and carries an existing function's body INLINE rather than calling the copy,
+  # which is kept only so `strict off` can restore it byte-for-byte.
   _hiveguard_strict_wrap() {
     local c="$1"
     # Never wrap a wrapper: the marker in the body is the only recursion guard.
     [[ $functions[$c] == *_hiveguard_strict_gate* ]] && return 0
+    local self="${(qq)_HIVEGUARD_STRICT_DIR}/hiveguard-strict.zsh"
+    local pre='(( ${+functions[_hiveguard_strict_gate]} )) || builtin source -- '$self' 2>/dev/null
+if (( ${+functions[_hiveguard_strict_gate]} )); then _hiveguard_strict_gate '$c' "$@" || return $?
+else print -u2 -r -- "hiveguard strict: guard not loadable, running '$c' unchecked"; fi
+'
     if (( ${+functions[$c]} )); then
       functions[_hiveguard_strict_orig_${c}]=$functions[$c]
-      functions[$c]='_hiveguard_strict_gate '$c' "$@" || return $?; _hiveguard_strict_orig_'$c' "$@"'
+      functions[$c]=$pre$functions[$c]
     else
       (( ${+functions[_hiveguard_strict_orig_${c}]} )) && unfunction _hiveguard_strict_orig_${c}
-      functions[$c]='_hiveguard_strict_gate '$c' "$@" || return $?; command '$c' "$@"'
+      functions[$c]=$pre'command '$c' "$@"'
     fi
     (( ${_hiveguard_strict_wrapped[(I)$c]} )) || _hiveguard_strict_wrapped+=( $c )
   }

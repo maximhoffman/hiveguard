@@ -314,6 +314,49 @@ foo-gone
 npm-still-wrapped' "$ZOUT"
 
 # =============================================================================
+# M. Shell snapshots (Claude Code): the wrapper survives without its helpers
+# =============================================================================
+# Claude Code never sources ~/.zshrc per command. It replays a snapshot of the
+# shell's functions, dropping every name that starts with a single `_` (it
+# treats them as completion functions), and carries no globals or zmodloads.
+# So the snapshot has `npm` but neither the gate nor its state. Mimic that.
+snapshot() { # $1 = setup to source, $2 = snapshot file
+  zrun "$1
+for f in \${(ko)functions}; do [[ \$f == _[^_]* ]] || typeset -f -- \$f; done > $2"
+}
+cfg 'mark_finder=0
+strict=1'
+markers "$T/proj/app	active	1 active vulnerabilities
+"
+rm -f "$HIVEGUARD_PAUSES"
+snapshot "source $STRICT" "$T/snap.zsh"
+zrun "source $T/snap.zsh; cd $T/proj/app; npm test; print rc=\$?"
+is "M/snapshot: a red project is still refused" 'rc=77' "$ZOUT"
+lacks "M/snapshot: no command-not-found" "$ZERR" 'command not found'
+: > "$HIVEGUARD_MARKERS"
+print -r -- "$T/proj	$(now)" > "$HIVEGUARD_COVERAGE"
+zrun "source $T/snap.zsh; cd $T/proj/app; npm test; print rc=\$?"
+is "M/snapshot: a clean project runs the real command" 'REAL npm test
+rc=0' "$ZOUT"
+# Bumblebee's body must still run after the gate, though its own helper is gone
+# too: the gate refuses first, and nothing points at a lost _orig_ copy.
+markers "$T/proj/app	active	1 active vulnerabilities
+"
+snapshot "source $BUMBLEBEE; source $STRICT" "$T/snap-bb.zsh"
+zrun "source $T/snap-bb.zsh; cd $T/proj/app; npm test; print rc=\$?"
+is "M/snapshot+bumblebee: a red project is refused by the gate" 'rc=77' "$ZOUT"
+lacks "M/snapshot+bumblebee: no lost _orig_ copy is called" "$ZERR" '_hiveguard_strict_orig_npm'
+# hiveguard moved or uninstalled after the snapshot was taken: warn, then run.
+mkdir -p "$T/gone"
+cp "$STRICT" "$T/gone/hiveguard-strict.zsh"
+snapshot "source $T/gone/hiveguard-strict.zsh" "$T/snap-gone.zsh"
+rm -rf "$T/gone"
+zrun "source $T/snap-gone.zsh; cd $T/proj/app; npm test; print rc=\$?"
+is "M/snapshot, guard file gone: the command still runs" 'REAL npm test
+rc=0' "$ZOUT"
+contains "M/snapshot, guard file gone: one-line warning" "$ZERR" 'running npm unchecked'
+
+# =============================================================================
 if (( FAILED )); then
   print -r -- "FAILED"
   exit 1

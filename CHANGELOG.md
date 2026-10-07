@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Strict mode no longer breaks every wrapped command (`npm`, `python3`, `swift`, …)
+  with `command not found: _hiveguard_strict_gate` (exit 127) in Claude Code's
+  Bash tool. Claude Code replays a snapshot of shell functions that drops
+  `_`-prefixed helpers and all globals; the wrappers now re-load the guard by
+  absolute path when the gate is missing (so red projects are still refused),
+  and warn-and-run if hiveguard is gone. Open Claude Code sessions keep their old
+  snapshot — restart them to pick this up.
+
 ## [1.6.0] - 2026-10-07
 
 ### Added
