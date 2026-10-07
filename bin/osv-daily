@@ -5,7 +5,7 @@
 #
 #   osv-daily              # interactive: open today's report, else scan
 #   osv-daily <path>...    # same, scanning one or more given folders
-#   osv-daily --open       # just open the last report (never scans)
+#   osv-daily --open [--at <anchor>]  # open the last report (never scans); --at jumps to a report anchor
 #   osv-daily --rescan     # force a fresh scan now (never prompts)
 #   osv-daily --if-due     # scan only if today's report is missing/stale
 #   osv-daily --probe <p>  # internal: scan ONE project root into its own report
@@ -52,6 +52,10 @@
 # this script skips terminal-notifier; otherwise it notifies as always.
 # A failed scan (scanner error or no output) records ok:false with the error,
 # logs a FAILED line and keeps the previous report, baseline and markers.
+# Every time the report is opened via `hiveguard daily --open` (plain or with
+# --at) osv-daily stamps ~/.hiveguard/osv-report-opened (override:
+# HIVEGUARD_REPORT_OPENED) with the current time; the "unseen" carry-over
+# above and the menu bar app both key off that stamp.
 set -euo pipefail
 export PATH="${HIVEGUARD_TOOL_PATH:+$HIVEGUARD_TOOL_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
@@ -62,7 +66,7 @@ print_header() {
   if [ -t 1 ]; then awk -v pretty=1 -f "$here/help.awk" "$0"; else awk -v pretty=0 -f "$here/help.awk" "$0"; fi
 }
 usage_err() {
-  echo "usage: osv-daily [--open | --rescan | --if-due] [path...]" >&2
+  echo "usage: osv-daily [--open [--at <anchor>] | --rescan | --if-due] [path...]" >&2
   echo "       osv-daily --probe <path>" >&2
   exit 2
 }
@@ -77,13 +81,17 @@ canon_path() {
     || printf '%s' "$p"
 }
 
-open_flag=0; rescan_flag=0; ifdue_flag=0; probe_flag=0; PROBE_PATH=""; TARGETS=()
+open_flag=0; rescan_flag=0; ifdue_flag=0; probe_flag=0; PROBE_PATH=""; AT_ANCHOR=""; TARGETS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) print_header; exit 0 ;;
     --open)    open_flag=1 ;;
     --rescan)  rescan_flag=1 ;;
     --if-due)  ifdue_flag=1 ;;
+    --at)
+      shift
+      [ $# -gt 0 ] || { echo "osv-daily: --at needs an anchor" >&2; usage_err; }
+      AT_ANCHOR="$1" ;;
     --probe)
       shift
       [ $# -gt 0 ] || { echo "osv-daily: --probe needs a path" >&2; usage_err; }
@@ -97,6 +105,16 @@ done
 if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; }; then
   echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
   exit 2
+fi
+if [ -n "$AT_ANCHOR" ] && [ "$open_flag" != 1 ]; then
+  echo "osv-daily: --at requires --open" >&2
+  exit 2
+fi
+if [ -n "$AT_ANCHOR" ]; then
+  case "$AT_ANCHOR" in
+    [pf]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "osv-daily: invalid anchor: $AT_ANCHOR" >&2; exit 2 ;;
+  esac
 fi
 # --probe is the strict-mode background scan of ONE project root: exactly one
 # path, no mode flags, its own report, no state baseline (see below).
@@ -136,6 +154,26 @@ APP_PID="${HIVEGUARD_APP_PID:-$HOME/.hiveguard/menubar.pid}"
 # --- open-or-rescan gate (evaluated before any scan) -----------------------
 report_is_today() { [ -f "$REPORT" ] && [ "$(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null)" = "$(date +%Y-%m-%d)" ]; }
 
+# Stamp "the report was just opened" (atomic tmp+mv) — every open_report call
+# writes this, regardless of --at, so the menu bar app and the next scan's
+# "unseen" carry-over both see it.
+write_opened() {
+  mkdir -p "$(dirname "$OPENED")" 2>/dev/null || true
+  date +%s > "$OPENED.tmp" && mv "$OPENED.tmp" "$OPENED"
+}
+# Open the report, jumping to $AT_ANCHOR when set. open(1) drops URL fragments
+# on file: URLs, so a non-empty anchor goes through `osascript ... open
+# location` instead (AppleScript keeps the fragment); falls back to plain
+# `open` if osascript fails. Always stamps the opened file either way.
+open_report() {
+  if [ -n "$AT_ANCHOR" ]; then
+    osascript -e "open location \"file://$REPORT#$AT_ANCHOR\"" >/dev/null 2>&1 || open "$REPORT"
+  else
+    open "$REPORT"
+  fi
+  write_opened
+}
+
 # print the recovered summary from the last scan's state file (Part B).
 print_last_summary() {
   STATE="$STATE" REPORT="$REPORT" python3 - <<'PYEOF' || true
@@ -160,7 +198,7 @@ if [ "$open_flag" = 1 ]; then
   if [ -f "$REPORT" ]; then
     print_last_summary   # "I missed the notification" recovery, before opening
     report_is_today || echo "Note: report is from $(stat -f %Sm -t %Y-%m-%d "$REPORT" 2>/dev/null) and may be stale." >&2
-    open "$REPORT"
+    open_report
     exit 0
   fi
   echo "No report yet at $REPORT — run osv-daily to create one." >&2
@@ -175,7 +213,7 @@ elif [ "$ifdue_flag" = 1 ]; then
 elif [ -t 0 ] && [ -t 1 ]; then
   if report_is_today; then
     print_last_summary   # show the recovered summary before opening + prompting
-    open "$REPORT"
+    open_report
     printf 'Rescan now? [y/N] ' >&2
     read -r ans || ans=""
     case "$ans" in y|Y) : ;; *) exit 0 ;; esac
@@ -285,7 +323,7 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
   # silent 0 the non-interactive path yields. Then fall through to the shared
   # empty-JSON fallback: report + state still get written, osv-daily still 0.
   if [ "$scan_rc" -gt 1 ] || [ ! -s "$JSON" ]; then
-    echo "⚠ osv-scanner exited with code $scan_rc — report will show 0 results. Last output:" >&2
+    echo "⚠ osv-scanner exited with code $scan_rc — previous report and state kept. Last output:" >&2
     grep -v '^Scanned ' "$ERRFILE" 2>/dev/null | tail -5 >&2 || true
   fi
 else
@@ -353,6 +391,13 @@ import json, os, html, re, shlex, hashlib, time
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
     return os.environ.get(k, dv)
+
+# h12 = first 12 hex chars of SHA-1 — the report's DOM anchors (p-/f-, section
+# 2.7) and osv-run.json's "anchor"/"project_anchor" (below) are the SAME ids,
+# computed with this one function, so `hiveguard daily --open --at <id>` from
+# a run-file id always lands on the matching report element.
+def h12(s):
+    return hashlib.sha1(s.encode()).hexdigest()[:12]
 
 # --- dedup scan results by source path -------------------------------------
 # osv-scanner can emit the SAME source.path more than once (multiple extractors
@@ -579,6 +624,13 @@ for r in d.get("results", []):
 active.sort(key=lambda x: x["maxsev"], reverse=True)
 acked.sort(key=lambda x: x["maxsev"], reverse=True)
 
+# A partially-muted package appears once per section (an active fragment AND
+# an acked fragment for the same (src, pkg)) — same for a project whose
+# packages split that way. Both would otherwise render the same DOM id twice;
+# the active row/card wins the plain id, the acked twin gets suffix "-k".
+active_srcs = {pr["src"] for pr in active}
+active_pkg_keys = {(pr["src"], p["name"]) for pr in active for p in pr["pkgs"]}
+
 # --- per-project-root Finder markers (drive folder-mark) -------------------
 # A finding's source path is a manifest (a file). Its project ROOT is the
 # nearest ancestor of the manifest's directory that contains a .git (dir OR
@@ -733,7 +785,14 @@ def pkg_row(p, src, section):
             btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack")
     else:
         btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute")
-    return (f'<tr><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
+    # section 2.7 report anchor: f-<h12(src\0pkg)>, same formula as the run
+    # file's "anchor". When this (src, pkg) also has an active-section row
+    # (partial mute), the active row wins the plain id and this acked twin
+    # gets suffix "-k" so the two <tr> elements don't share a DOM id.
+    fid = "f-" + h12(src + "\0" + p["name"])
+    if section == "acked" and (src, p["name"]) in active_pkg_keys:
+        fid += "-k"
+    return (f'<tr id="{fid}"><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
             f'<td class="mono">{html.escape(p["version"])}</td>'
             f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span>{badge}</td>'
             f'<td class="mono fix">{fix}</td>'
@@ -754,7 +813,13 @@ def proj_card(pr, muted):
     sel = ('<input type="checkbox" class="selp" '
            f'data-ack="{html.escape("hiveguard ack " + shlex.quote(pr["src"]))}" '
            f'aria-label="Select {short(pr["src"])} to mute">') if not muted else ''
-    return (f'<details class="proj{" acked" if muted else ""}"><summary>'
+    # section 2.7 report anchor: p-<h12(src)>. Same "-k" rule as pkg_row above,
+    # for a project that appears in both sections (some packages active, some
+    # fully covered by an ack).
+    pid = "p-" + h12(pr["src"])
+    if muted and pr["src"] in active_srcs:
+        pid += "-k"
+    return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
             f'<span class="chev">▶</span>{sel}'
             f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
             f'<span class="pname">{short(pr["src"])}</span>{whole}'
@@ -864,6 +929,7 @@ tr:last-child td{{border-bottom:none}}
 .ackwrap>summary:hover{{color:var(--accent)}}
 .ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
 footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
+.hl{{outline:2px solid var(--accent);outline-offset:2px}}
 </style>
 <div class="wrap">
 <header>
@@ -953,6 +1019,21 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
       copy(cmds.join(' && \\\\\\n'),copySel);
     }});
   }}
+  function openAnchor(){{
+    if(!location.hash) return;
+    var el=document.getElementById(location.hash.slice(1));
+    if(!el) return;
+    var p=el;
+    while(p){{
+      if(p.tagName==='DETAILS') p.open=true;
+      p=p.parentElement;
+    }}
+    el.scrollIntoView({{block:'center'}});
+    el.classList.add('hl');
+    setTimeout(function(){{el.classList.remove('hl');}},3000);
+  }}
+  window.addEventListener('load',openAnchor);
+  window.addEventListener('hashchange',openAnchor);
   sync();
 }})();
 </script>'''
@@ -963,9 +1044,6 @@ open(os.environ["OUT"], "w").write(page)
 # `new` plus the previous run's unseen ids still present in this scan, carried
 # over only while the report has not been opened since that previous run. Acks
 # are NOT applied here — `hiveguard status` applies them live.
-def h12(s):
-    return hashlib.sha1(s.encode()).hexdigest()[:12]
-
 if sf:
     run_path = os.environ.get("RUN", "")
     all_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}

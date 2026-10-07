@@ -115,8 +115,9 @@ check "--probe with no path exits 2" "2" "$?"
 # --- 5. a scanner failure never records coverage ----------------------------
 # An empty directory has no manifests: osv-scanner 2.6.0 prints "No package
 # sources found" and exits 128 with empty stdout, so SCAN_OK stays 0. osv-daily
-# itself still exits 0 and still writes its "0 results" report (unchanged
-# behaviour) — only the coverage row must be withheld.
+# itself still exits 0, but (since H1) no longer writes a report on a failed
+# scan — it keeps whatever report/state already existed and records the
+# failure in osv-run.json instead. Here, only the coverage row is checked.
 rm -f "$HIVEGUARD_COVERAGE"
 "$REPO/bin/osv-daily" "$T/empty" >/dev/null 2>&1; rc=$?
 check "scan of a folder with no manifests still exits 0" "0" "$rc"
