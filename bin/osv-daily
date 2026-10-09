@@ -45,6 +45,9 @@
 # ~/.hiveguard/osv-run.json (override: HIVEGUARD_RUN): ok/failed, counts, the
 # advisories new in this run and the "unseen" ones carried over until the report
 # is opened — the file the menu bar app reads (via `hiveguard status`).
+# Its `active` list holds every active finding of the run (one entry per row of
+# the report's Active section, ids not covered by an ack at scan time) — what
+# the app checks report links against.
 # While the scanner runs, ~/.hiveguard/osv-daily.pid (override: HIVEGUARD_SCAN_PID)
 # holds this run's pid; it is removed when the run ends.
 # Notifier handoff: while the menu bar app is running (live pid in
@@ -56,6 +59,15 @@
 # --at) osv-daily stamps ~/.hiveguard/osv-report-opened (override:
 # HIVEGUARD_REPORT_OPENED) with the current time; the "unseen" carry-over
 # above and the menu bar app both key off that stamp.
+#
+# Report action buttons: when the menu bar app is running at report time (the
+# same live-pid check as the notifier handoff) the Active section's buttons
+# become hiveguard:// links the app handles — "mark as known" (ack <src> <pkg>),
+# "mark project as known" (ack <src>) and, only with strict mode on and for a
+# root strict mode would block, "pause strict 1 h / 2 h" (strict pause). The
+# app always asks for confirmation; the terminal command stays behind a small
+# "copy" button. --probe reports never carry links, and with the app not
+# running the report is exactly as before. Grammar: docs/report-links.md.
 set -euo pipefail
 export PATH="${HIVEGUARD_TOOL_PATH:+$HIVEGUARD_TOOL_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
@@ -155,6 +167,7 @@ RUN="${HIVEGUARD_RUN:-$HOME/.hiveguard/osv-run.json}"
 SCAN_PID="${HIVEGUARD_SCAN_PID:-$HOME/.hiveguard/osv-daily.pid}"
 OPENED="${HIVEGUARD_REPORT_OPENED:-$HOME/.hiveguard/osv-report-opened}"
 APP_PID="${HIVEGUARD_APP_PID:-$HOME/.hiveguard/menubar.pid}"
+CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
 # A probe writes its own report and never reads or writes the daily baseline.
 [ "$probe_flag" = 1 ] && REPORT="$HOME/.hiveguard/osv-probe.html"
 
@@ -167,6 +180,18 @@ report_is_today() { [ -f "$REPORT" ] && [ "$(stat -f %Sm -t %Y-%m-%d "$REPORT" 2
 write_opened() {
   mkdir -p "$(dirname "$OPENED")" 2>/dev/null || true
   date +%s > "$OPENED.tmp" && mv "$OPENED.tmp" "$OPENED"
+}
+# Is the menu bar app running? (live pid in $APP_PID; a stale pid after a crash
+# fails kill -0). Gates the report's action links and the notifier handoff.
+app_running() { [ -f "$APP_PID" ] && kill -0 "$(cat "$APP_PID" 2>/dev/null)" 2>/dev/null; }
+# Read a key from the hiveguard config (same as strict-mode's config_get).
+config_get() {
+  local key="$1" def="$2" val=""
+  if [ -f "$CONFIG" ]; then
+    val="$(awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");v=$0} END{print v}' \
+           "$CONFIG" 2>/dev/null || true)"
+  fi
+  if [ -n "$val" ]; then printf '%s' "$val"; else printf '%s' "$def"; fi
 }
 # Open the report, jumping to $AT_ANCHOR when set. LaunchServices drops URL
 # fragments on file: URLs before the browser sees them (both open(1) and
@@ -398,6 +423,7 @@ doc = {
     "started_epoch": int(os.environ["STARTED"]), "finished_epoch": int(time.time()),
     "stamp": os.environ["STAMP"], "target": os.environ["TARGET"],
     "counts": None, "roots": None, "new": [], "unseen": unseen,
+    "active": (prev.get("active") if isinstance(prev, dict) else None) or [],
 }
 os.makedirs(os.path.dirname(run) or ".", exist_ok=True)
 tmp = run + ".tmp"
@@ -420,8 +446,11 @@ fi
 
 # compact HTML report. Python owns the counts because it also applies the
 # acknowledgement filter, then writes the active/acked tallies to $COUNTS.
-JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" python3 <<'PYEOF'
-import json, os, html, re, shlex, hashlib, time
+# APP_RUNNING / STRICT_ON gate the report's action links (see the header).
+STRICT_ON=0; [ "$(config_get strict 0)" = 1 ] && STRICT_ON=1
+APP_RUNNING=0; app_running && APP_RUNNING=1
+APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" python3 <<'PYEOF'
+import json, os, html, re, shlex, hashlib, time, urllib.parse
 d = json.load(open(os.environ["JSON"]))
 def ig(k, dv=""):
     return os.environ.get(k, dv)
@@ -678,6 +707,11 @@ scan_targets = [os.path.realpath(t) for t in os.environ.get("SCAN_TARGETS", "").
 # resolved root), so the "a root that is a scan target must not be marked" rule
 # — meant to stop a stray manifest tagging a whole container dir — is disabled.
 probe = os.environ.get("PROBE", "0") == "1"
+# Report action links (hiveguard://, docs/report-links.md): only while the menu
+# bar app is running at report time, never in a probe report. Pause links also
+# need strict mode on (and a root strict would block — a key of root_agg).
+links_on = os.environ.get("APP_RUNNING", "0") == "1" and not probe
+strict_on = os.environ.get("STRICT_ON", "0") == "1"
 
 def finding_root(src):
     d0 = os.path.realpath(os.path.dirname(src))
@@ -794,6 +828,19 @@ def cp_btn(cmd, label):
     return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
             f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
 
+def app_link(action, params, label, title, extra=""):
+    # params: ordered [(name, value)]; values percent-encoded with no safe chars
+    q = "&".join(k + "=" + urllib.parse.quote(v, safe="") for k, v in params)
+    href = "hiveguard://" + action + "?v=1&" + q
+    return (f'<a class="act-link{extra}" href="{html.escape(href)}" '
+            f'title="{title}">{html.escape(label)}</a>')
+
+def cp_alt(cmd):
+    # the terminal command, tucked behind a small secondary copy button
+    c = html.escape(cmd)
+    return (f'<button class="cp cp-alt" type="button" data-cmd="{c}" '
+            f'title="Copy the terminal command instead" aria-label="Copy command: {c}">copy</button>')
+
 def pkg_row(p, src, section):
     cls, lbl = sev_bucket(p["sev"])
     active_sec = section == "active"
@@ -809,16 +856,30 @@ def pkg_row(p, src, section):
           + (f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else "")
     fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
     if section == "acked":
-        btn = cp_btn("hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute")
+        cmd, label = "hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute"
     elif pierced:
         # re-ack folds the pierced advisory back into the existing mute; use the
         # project form when the coverage came from a whole-project mute.
         if p.get("reack_project"):
-            btn = cp_btn("hiveguard ack " + shlex.quote(src), "re-ack")
+            cmd, label = "hiveguard ack " + shlex.quote(src), "re-ack"
         else:
-            btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack")
+            cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack"
     else:
-        btn = cp_btn("hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute")
+        cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute"
+    if links_on and active_sec:
+        if pierced:
+            title = ("Fold the new advisory into this package's mute via the HiveGuard app "
+                     "(asks for confirmation)")
+            if p.get("reack_project"):
+                link = app_link("ack-project", [("src", src)], "re-ack", title)
+            else:
+                link = app_link("ack", [("src", src), ("pkg", p["name"])], "re-ack", title)
+        else:
+            link = app_link("ack", [("src", src), ("pkg", p["name"])], "mark as known",
+                            "Mark this finding as known via the HiveGuard app (asks for confirmation)")
+        btn = f'<span class="actg">{link}{cp_alt(cmd)}</span>'
+    else:
+        btn = cp_btn(cmd, label)
     # section 2.7 report anchor: f-<h12(src\0pkg)>, same formula as the run
     # file's "anchor". When this (src, pkg) also has an active-section row
     # (partial mute), the active row wins the plain id and this acked twin
@@ -841,7 +902,20 @@ def proj_card(pr, muted):
         whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
         last = "Unmute"
     else:
-        head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
+        if links_on:
+            links = app_link("ack-project", [("src", pr["src"])], "mark project as known",
+                             "Mark every finding of this project as known via the HiveGuard app "
+                             "(asks for confirmation)")
+            root = finding_root(pr["src"])
+            if strict_on and root in root_agg:
+                for dur, words in (("1h", "1 hour"), ("2h", "2 hours")):
+                    links += app_link("pause", [("root", root), ("for", dur)],
+                                      "pause strict " + dur[:-1] + " h",
+                                      "Pause strict mode for this project for " + words +
+                                      " via the HiveGuard app (asks for confirmation)", " pause")
+            head_btn = f'<span class="actg">{links}{cp_alt("hiveguard ack " + shlex.quote(pr["src"]))}</span>'
+        else:
+            head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
         whole = ''
         last = "Mute"
     sel = ('<input type="checkbox" class="selp" '
@@ -886,6 +960,19 @@ if acked:
         'Copy an “unmute” command to bring one back into the count.</p>'
         + "".join(proj_card(pr, True) for pr in acked) +
         '</details>')
+
+# links-only CSS and footer sentence — nothing extra when links are off, so that
+# report stays byte-identical to the pre-links one
+links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
+             "\n.act-link{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--surface);border:1px solid var(--accent);border-radius:6px;padding:3px 8px;text-decoration:none;white-space:nowrap}"
+             "\n.act-link:hover{background:var(--accent);color:#fff}"
+             "\n.act-link.pause{color:var(--high);border-color:var(--high)}"
+             "\n.act-link.pause:hover{background:var(--high);color:#fff}"
+             "\n.cp.cp-alt{font-size:10px;padding:2px 6px;opacity:.7}"
+             "\n.cp.cp-alt:hover{opacity:1}") if links_on else ""
+footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
+               "“copy” gives the terminal command instead." if links_on else
+               "Mute an old project with the “mute” button (→ hiveguard ack).")
 
 vuln_l = "vulnerabilities" + (f' · +{k_vuln} muted' if k_vuln else '')
 lede_extra = (' Muted projects/findings are excluded — see <b>Acknowledged</b> at the bottom.'
@@ -963,7 +1050,7 @@ tr:last-child td{{border-bottom:none}}
 .ackwrap>summary:hover{{color:var(--accent)}}
 .ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
 footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
-.hl{{outline:2px solid var(--accent);outline-offset:2px}}
+.hl{{outline:2px solid var(--accent);outline-offset:2px}}{links_css}
 </style>
 <div class="wrap">
 <header>
@@ -981,7 +1068,7 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 {toolbar}
 {body}
 {acked_html}
-<footer>osv-daily · one scan -> report + notification. Mute an old project with the “mute” button (→ hiveguard ack). Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
+<footer>osv-daily · one scan -> report + notification. {footer_hint} Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
 </div>
 <script>
 (function(){{
@@ -1127,6 +1214,15 @@ if sf:
         return (-sv, e.get("src") or "", e.get("pkg") or "")
     unseen = sorted(merged.values(), key=order)
     this_run_new.sort(key=order)
+    # every active package fragment (the report's Active rows) — what the app
+    # validates report links against; ids = the uncovered ids at scan time
+    active_entries = sorted(({
+        "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
+        "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
+        "ids": list(p["ids"]),
+        "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
+        "project_anchor": "p-" + h12(pr["src"]),
+    } for pr in active for p in pr["pkgs"]), key=order)
     roots = {r: {"status": "active" if e["has_active"] else "acked",
                  "active_vulns": e["av"], "crit_pkgs": e["ac"], "acked_vulns": e["kv"]}
              for r, e in root_agg.items()}
@@ -1136,7 +1232,7 @@ if sf:
         "finished_epoch": int(time.time()),
         "stamp": ig("STAMP"), "target": ig("TARGET"),
         "counts": state["counts"], "roots": roots,
-        "new": this_run_new, "unseen": unseen,
+        "new": this_run_new, "unseen": unseen, "active": active_entries,
     }
     if run_path:
         os.makedirs(os.path.dirname(run_path) or ".", exist_ok=True)
@@ -1192,7 +1288,6 @@ echo "[$STAMP] ${log_kind}projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACT
 # notification only on ACTIVE (non-acknowledged) findings — and only when the
 # menu bar app is not running (it owns notifications while its pid is live; a
 # stale pid after a crash fails kill -0, so we fall back to notifying).
-app_running() { [ -f "$APP_PID" ] && kill -0 "$(cat "$APP_PID" 2>/dev/null)" 2>/dev/null; }
 if [ "${ACTIVE_VULNS:-0}" -gt 0 ] && ! app_running && command -v terminal-notifier >/dev/null; then
   terminal-notifier -title "osv-daily: vulnerabilities found" \
     -message "$ACTIVE_PROJECTS project(s), $ACTIVE_PKGS package(s), $ACTIVE_VULNS total ($ACTIVE_CRIT critical)$new_suffix" \

@@ -5,6 +5,8 @@
 #   - every non-probe scan writes osv-run.json (ok, rc, error, counts, roots,
 #     new, unseen, started/finished epochs) atomically
 #   - `new` lists this run's new advisory ids per package, with anchors
+#   - `active` lists every active package fragment (uncovered ids), sorted, and
+#     shrinks after an ack; a failed scan carries it unchanged
 #   - `unseen` carries over a never-opened finding across scans, is reset once
 #     the report was opened after the previous run, and drops ids that vanished
 #   - the scan pid file exists (and is live) while the scanner runs and is gone
@@ -110,7 +112,7 @@ check "run file: roots aggregate for the project root" "active 3 1 0" \
   "$(jq -r --arg r "$T/proj/app" '.roots[$r] | "\(.status) \(.active_vulns) \(.crit_pkgs) \(.acked_vulns)"' "$HIVEGUARD_RUN" 2>/dev/null)"
 check "run file: counts identical to the state file's" "same" \
   "$([ "$(jq -cS .counts "$HIVEGUARD_RUN" 2>/dev/null)" = "$(jq -cS .counts "$HIVEGUARD_STATE")" ] && echo same || echo differ)"
-check "run file: exactly the documented keys" "counts,error,finished_epoch,new,ok,rc,roots,schema,stamp,started_epoch,target,unseen" \
+check "run file: exactly the documented keys" "active,counts,error,finished_epoch,new,ok,rc,roots,schema,stamp,started_epoch,target,unseen" \
   "$(jq -r 'keys|join(",")' "$HIVEGUARD_RUN" 2>/dev/null)"
 check "no leftover .tmp next to the run file" "absent" \
   "$([ -e "$HIVEGUARD_RUN.tmp" ] && echo present || echo absent)"
@@ -125,6 +127,18 @@ check "new entry: src, version, eco" "$SRC 3.0.1 npm" "$(J '.new[0].src, .new[0]
 check "new entry: package anchor" "f-$(h12pkg "$SRC" fast-uri)" "$(J '.new[0].anchor')"
 check "new entry: project anchor" "p-$(h12 "$SRC")" "$(J '.new[0].project_anchor')"
 check "unseen = this run's new" "1 GHSA-AAAA-0003" "$(J '(.unseen|length), (.unseen[0].ids|join(","))')"
+check "active: every active package, sorted (lodash first)" "2 lodash fast-uri" \
+  "$(J '(.active|length), .active[0].pkg, .active[1].pkg')"
+check "active: uncovered ids of the fragment" "GHSA-AAAA-0001,GHSA-AAAA-0002,GHSA-AAAA-0003" "$(J '.active[1].ids|join(",")')"
+check "active: root and anchors as the new entry" "same" \
+  "$([ "$(J '.active[1].root, .active[1].anchor, .active[1].project_anchor')" = "$(J '.new[0].root, .new[0].anchor, .new[0].project_anchor')" ] && echo same || echo differ)"
+check "active: entry keys" "anchor,eco,fix,ids,pkg,project_anchor,root,sev,src,version" "$(jq -r '.active[0]|keys|join(",")' "$HIVEGUARD_RUN" 2>/dev/null)"
+
+# --- 2b. an ack shrinks active on the next scan --------------------------------
+cp "$HIVEGUARD_RUN" "$T/run-before-ack.json"; cp "$HIVEGUARD_STATE" "$T/state-before-ack.json"
+"$HG/bin/hiveguard" ack "$SRC" fast-uri >/dev/null </dev/null; scan "$T/run2.json"
+check "active after acking fast-uri" "1 lodash" "$(J '(.active|length), .active[0].pkg')"
+rm -f "$HIVEGUARD_ACKS"; cp "$T/run-before-ack.json" "$HIVEGUARD_RUN"; cp "$T/state-before-ack.json" "$HIVEGUARD_STATE"
 
 # --- 3. carry-over while the report was never opened ------------------------
 scan "$T/run2.json"
@@ -174,6 +188,7 @@ check "failed run: ok rc error-lines counts new unseen" "false 128 2 null 0 1" \
   "$(J '.ok, .rc, (.error|split("\n")|length), .counts, (.new|length), (.unseen|length)')"
 check "failed run: roots null, unseen carried unchanged" "null GHSA-AAAA-0003" \
   "$(J '.roots, (.unseen[0].ids|join(","))')"
+check "failed run: active carried unchanged" "2 lodash fast-uri" "$(J '(.active|length), .active[0].pkg, .active[1].pkg')"
 check "failed run: error has no progress lines" "0" \
   "$(jq -r '.error' "$HIVEGUARD_RUN" | grep -c '^Scanned')"
 check "failed run: error text" "no package sources found|fatal: giving up" \
@@ -193,7 +208,7 @@ printf '#!/bin/sh\necho "Scanned x and found 0 packages" >&2\nexit 127\n' > "$T/
 chmod +x "$T/stubs/osv-scanner.quiet"
 mv "$T/stubs/osv-scanner" "$T/stubs/osv-scanner.real"; mv "$T/stubs/osv-scanner.quiet" "$T/stubs/osv-scanner"
 scan "$T/run1.json"
-check "silent failure: ok rc error unseen" "false 127 null 0" "$(J '.ok, .rc, .error, (.unseen|length)')"
+check "silent failure: ok rc error unseen active" "false 127 null 0 0" "$(J '.ok, .rc, .error, (.unseen|length), (.active|length)')"
 check "silent failure: log says no output" "1" \
   "$(tail -n1 "$HOME/.hiveguard/osv-daily.log" | grep -c 'FAILED rc=127 (no output)$')"
 mv "$T/stubs/osv-scanner.real" "$T/stubs/osv-scanner"
