@@ -61,14 +61,17 @@ cat > "$HIVEGUARD_SCHED_PLIST" <<EOF
 </dict></plist>
 EOF
 
-# --- seed: a "red" status without a scan (plan H2 acceptance) ---------------
+# --- seed: a "red" status without a scan (plan H2 acceptance; seed v2 adds active[]) ---------------
 NOW=$(date +%s); cat > "$HIVEGUARD_RUN" <<EOF
 {"schema":1,"ok":true,"rc":1,"error":null,"started_epoch":$((NOW-7230)),"finished_epoch":$((NOW-7200)),"stamp":"x","target":"$T/proj",
  "counts":{"active":{"projects":1,"pkgs":2,"vulns":4,"crit":1},"acked":{"projects":0,"pkgs":0,"vulns":0,"crit":0},"new_vulns":4,"resolved_vulns":0},
  "roots":{"$T/proj/app":{"status":"active","active_vulns":4,"crit_pkgs":1,"acked_vulns":0}},
  "new":[],"unseen":[
   {"src":"$SRC","root":"$T/proj/app","pkg":"fast-uri","version":"3.0.1","eco":"npm","sev":7.5,"fix":"3.0.6","ids":["GHSA-AAAA-0001","GHSA-AAAA-0002","GHSA-AAAA-0003"],"anchor":"f-000000000001","project_anchor":"p-000000000002"},
-  {"src":"$SRC","root":"$T/proj/app","pkg":"lodash","version":"4.17.20","eco":"npm","sev":9.1,"fix":"4.17.21","ids":["GHSA-BBBB-0001"],"anchor":"f-000000000003","project_anchor":"p-000000000002"}]}
+  {"src":"$SRC","root":"$T/proj/app","pkg":"lodash","version":"4.17.20","eco":"npm","sev":9.1,"fix":"4.17.21","ids":["GHSA-BBBB-0001"],"anchor":"f-000000000003","project_anchor":"p-000000000002"}],
+ "active":[
+  {"src":"$SRC","root":"$T/proj/app","pkg":"lodash","version":"4.17.20","eco":"npm","sev":9.1,"fix":"4.17.21","ids":["GHSA-BBBB-0001"],"anchor":"f-000000000003","project_anchor":"p-000000000002"},
+  {"src":"$SRC","root":"$T/proj/app","pkg":"fast-uri","version":"3.0.1","eco":"npm","sev":7.5,"fix":"3.0.6","ids":["GHSA-AAAA-0001","GHSA-AAAA-0002","GHSA-AAAA-0003"],"anchor":"f-000000000001","project_anchor":"p-000000000002"}]}
 EOF
 printf '%s\tactive\t4 active vulnerabilities (1 critical)\n' "$T/proj/app" > "$HIVEGUARD_MARKERS"
 printf '%s\t%s\n%s\t%s\ngarbage\n' "$T/proj/app" "$((NOW+600))" "$T/other" "$((NOW-600))" > "$HIVEGUARD_PAUSES"
@@ -86,7 +89,7 @@ check "status --json exits 0" 0 "$rc"
 check "output is valid JSON" true "$(jq -e 'type=="object"' <<<"$S" 2>/dev/null || echo false)"
 check "compact (one line)" 1 "$(printf '%s\n' "$S" | wc -l | tr -d ' ')"
 check "top-level keys (schema 1)" \
-  "app attention attention_ids hiveguard now_epoch report scan schedule schema strict" \
+  "active active_ids app attention attention_ids hiveguard now_epoch report scan schedule schema strict" \
   "$(jq -r 'keys|join(" ")' <<<"$S")"
 check "core facts" "1 true git false null true 4 2 lodash true" \
   "$(jq -r '.schema, (.hiveguard.version|length > 0), .hiveguard.method, .scan.running, .scan.pid, .scan.last.ok, .attention_ids, (.attention|length), .attention[0].pkg, .attention[0].crit' <<<"$S" | row)"
@@ -102,6 +105,13 @@ check "attention entry keys" "anchor crit eco fix ids_acked ids_open pkg project
 check "attention project = root outside HOME kept as is" "$T/proj/app" "$(jq -r '.attention[0].project' <<<"$S")"
 check "attention passes metadata through" "f-000000000003 p-000000000002 4.17.21 9.1 npm 4.17.20" \
   "$(jq -r '.attention[0] | .anchor, .project_anchor, .fix, .sev, .eco, .version' <<<"$S" | row)"
+check "active: count, ids, order, crit, open/acked" "2 4 lodash true 3 0" \
+  "$(jq -r '(.active|length), .active_ids, .active[0].pkg, .active[0].crit, (.active[1].ids_open|length), (.active[1].ids_acked|length)' <<<"$S" | row)"
+check "active entry keys = attention entry keys" "anchor crit eco fix ids_acked ids_open pkg project project_anchor root sev src version" \
+  "$(jq -r '.active[0]|keys|join(" ")' <<<"$S")"
+check "active entry passes metadata through" "$T/proj/app f-000000000001 p-000000000002 $T/proj/app 3.0.6" \
+  "$(jq -r '.active[1] | .project, .anchor, .project_anchor, .root, .fix' <<<"$S" | row)"
+check "attention unchanged by active" "4 2" "$(jq -r '.attention_ids, (.attention|length)' <<<"$S" | row)"
 check "report: absent, never opened" "false null $REPORT" \
   "$(jq -r '.report.exists, .report.opened_epoch, .report.path' <<<"$S" | row)"
 check "schedule from the plist + launchctl print" "true true 10 0 $T/proj" \
@@ -117,19 +127,25 @@ check "paused until_epoch" "$((NOW+600))" "$(jq -r '.strict.paused[0].until_epoc
 # --- ack classification (plan 1.6) ------------------------------------------
 printf '{"schema":2,"projects":{"%s":{"ids":null,"since":"2026-10-07"}},"packages":{}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "open-ended project ack covers all" "0 0" "$(st | jq -r '.attention_ids, (.attention|length)' | row)"
+check "open-ended project ack empties active" "0 0" "$(st | jq -r '.active_ids, (.active|length)' | row)"
 printf '{"schema":2,"projects":{"%s":{"ids":{"lodash":["GHSA-BBBB-0001"]},"since":"x"}},"packages":{}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "id-scoped project ack covers only its ids" "3 1 fast-uri" "$(st | jq -r '.attention_ids, (.attention|length), .attention[0].pkg' | row)"
+check "id-scoped project ack: active follows" "3 1 fast-uri" "$(st | jq -r '.active_ids, (.active|length), .active[0].pkg' | row)"
 printf '{"schema":2,"projects":{},"packages":{"%s":{"fast-uri":{"ids":["GHSA-AAAA-0001","GHSA-AAAA-0002"],"since":"x"}}}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "package ack: partial" "2 2 GHSA-AAAA-0003 2" \
   "$(st | jq -r '.attention_ids, (.attention|length), (.attention[]|select(.pkg=="fast-uri")|(.ids_open|join(",")), (.ids_acked|length))' | row)"
+check "package ack: active partial" "2 2 GHSA-AAAA-0003 2" \
+  "$(st | jq -r '.active_ids, (.active|length), (.active[]|select(.pkg=="fast-uri")|(.ids_open|join(",")), (.ids_acked|length))' | row)"
 printf '{"schema":2,"projects":{},"packages":{"%s":{"lodash":{"ids":null,"since":"x"}}}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "open-ended package ack" "3 1" "$(st | jq -r '.attention_ids, (.attention|length)' | row)"
 printf '{"projects":["%s"],"packages":{}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "v1 project store → open-ended" 0 "$(st | jq -r '.attention_ids')"
+check "v1 project store → active open-ended" 0 "$(st | jq -r '.active_ids')"
 printf '{"projects":[],"packages":{"%s":["fast-uri"]}}\n' "$SRC" > "$HIVEGUARD_ACKS"
 check "v1 package store → open-ended" "1 lodash" "$(st | jq -r '.attention_ids, .attention[0].pkg' | row)"
 printf 'not json' > "$HIVEGUARD_ACKS"
 check "unreadable ack store → nothing acked" 4 "$(st | jq -r '.attention_ids')"
+check "unreadable ack store → active all open" 4 "$(st | jq -r '.active_ids')"
 rm -f "$HIVEGUARD_ACKS"
 
 # --- report, schedule, scan pid, app pid, hook --------------------------------
@@ -223,12 +239,24 @@ jq --argjson f "$((NOW-40*3600))" '.finished_epoch=$f' "$T/r0.bak" > "$HIVEGUARD
 check "plain: stale scan" "Protection: NOT WORKING — last scan 40h ago" "$("$HV" status | sed -n 3p)"
 cp "$T/r0.bak" "$HIVEGUARD_RUN"
 
+# a 1.6.0 run file has no active key
+jq 'del(.active)' "$T/r0.bak" > "$HIVEGUARD_RUN"
+check "run file without active → [] 0 (attention unaffected)" "[] 0 4" "$(st | jq -c '.active, .active_ids, .attention_ids' | row)"
+cp "$T/r0.bak" "$HIVEGUARD_RUN"
+# active: entries without open ids dropped; sorted sev desc, project, pkg
+jq '.active[0].ids=[]' "$T/r0.bak" > "$HIVEGUARD_RUN"
+check "active: entry with no ids dropped" "fast-uri 3" "$(st | jq -r '(.active|map(.pkg)|join("|")), .active_ids' | row)"
+jq '.active[1].sev=9.5 | .active[1].pkg="zeta"' "$T/r0.bak" > "$HIVEGUARD_RUN"
+check "active sorted sev desc (re-sorted, not file order)" "zeta|lodash" "$(st | jq -r '[.active[].pkg]|join("|")')"
+cp "$T/r0.bak" "$HIVEGUARD_RUN"
 mv "$HIVEGUARD_RUN" "$T/r.bak"
 check "no run file → null last, no attention" "null 0 0" "$(st | jq -r '.scan.last, .attention_ids, (.attention|length)' | row)"
+check "no run file → active [] 0" "[] 0" "$(st | jq -c '.active, .active_ids' | row)"
 check "plain: never scanned" "No scan has completed yet" "$("$HV" status | head -n1)"
 check "plain: never scanned → protection" "Protection: NOT WORKING — no scan yet" "$("$HV" status | sed -n 3p)"
 printf '{broken' > "$HIVEGUARD_RUN"
 check "unparsable run file → null last" "null 0" "$(st | jq -r '.scan.last, .attention_ids' | row)"
+check "unparsable run file → active [] 0" "[] 0" "$(st | jq -c '.active, .active_ids' | row)"
 mv "$T/r.bak" "$HIVEGUARD_RUN"
 
 jq '.ok=false | .rc=128 | .error="no package sources found\nfatal: giving up" | .counts=null | .roots=null' "$HIVEGUARD_RUN" > "$T/f.json"; cp "$T/f.json" "$HIVEGUARD_RUN"
@@ -257,6 +285,7 @@ for k in $(jq -r '[paths | map(select(type=="string")) | last | select(. != null
   grep -qE "\`([a-z_]+(\[\])?\.)*$k(\[\])?\`" "$DOC" 2>/dev/null || missing="$missing $k"
 done
 check "contract doc names every key" "" "$missing"
+check "schema history mentions active" 1 "$(awk '/^## Schema history/{f=1} f' "$DOC" | grep -c 'active')"
 check "contract doc has schema history" 1 "$(grep -c '^## Schema history' "$DOC" 2>/dev/null || echo 0)"
 
 if [ "$FAILS" -gt 0 ]; then echo "$FAILS check(s) failed"; exit 1; fi

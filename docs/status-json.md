@@ -77,6 +77,9 @@ Types: `int` = JSON integer, `number` = JSON number, `epoch` = int Unix seconds.
 | `attention[].anchor` | string | no | Report anchor of the package row, `f-<12 hex>`; pass to `hiveguard daily --open --at`. |
 | `attention[].project_anchor` | string | no | Report anchor of the project card, `p-<12 hex>`. |
 | `attention_ids` | int | no | Sum of `ids_open` lengths over `attention` — the red count. |
+| `active` | array of object | no | Every active finding of the last successful run — the report's Active rows — from the run file's `active` entries, each advisory id classified against the ack store live, exactly like `attention` (same "Ack rule", same `project` label, same sort; entries with no open id are dropped). `[]` when there is no run, or the run file predates this field (a 1.6.0 run file has no `active`). Used by the companion app to validate report action links (`docs/report-links.md`). |
+| `active[].*` | — | — | Same fields, types and meanings as `attention[].*` (`src`, `root`, `project`, `pkg`, `version`, `eco`, `sev`, `crit`, `fix`, `ids_open`, `ids_acked`, `anchor`, `project_anchor`). |
+| `active_ids` | int | no | Sum of `ids_open` lengths over `active`. |
 | `report` | object | no | The HTML report. |
 | `report.path` | string | no | `~/.hiveguard/osv-projects.html` (absolute). |
 | `report.exists` | bool | no | The report file exists. |
@@ -124,6 +127,10 @@ reflected by the next `status` call, no rescan needed.
    "pkg":"lodash","version":"4.17.20","eco":"npm","sev":9.1,"crit":true,"fix":"4.17.21",
    "ids_open":["GHSA-…"],"ids_acked":[],"anchor":"f-3f2a9c1d0b7e","project_anchor":"p-9a1b2c3d4e5f"}],
  "attention_ids":1,
+ "active":[{"src":"/Users/mh/Projects/x/app/package-lock.json","root":"/Users/mh/Projects/x/app","project":"x/app",
+   "pkg":"lodash","version":"4.17.20","eco":"npm","sev":9.1,"crit":true,"fix":"4.17.21",
+   "ids_open":["GHSA-…"],"ids_acked":[],"anchor":"f-3f2a9c1d0b7e","project_anchor":"p-9a1b2c3d4e5f"}],
+ "active_ids":1,
  "report":{"path":"/Users/mh/.hiveguard/osv-projects.html","exists":true,"opened_epoch":null},
  "schedule":{"configured":true,"loaded":true,"hour":10,"minute":0,"folders":["/Users/mh/Projects"]},
  "strict":{"enabled":true,"hook_sourced":true,"hook_hint":null,
@@ -137,3 +144,4 @@ reflected by the next `status` call, no rescan needed.
 | Schema | Date | Change |
 |---|---|---|
 | 1 | 2026-10 | initial |
+| 1 | 2026-10 | additive: `active[]`, `active_ids` — report action links (same schema per the compatibility rule) |

@@ -11,6 +11,10 @@
 # compatibility rule and the schema history — is docs/status-json.md. Change
 # both in the same commit.
 #
+# `active` lists every active finding of the last run (the report's Active rows),
+# classified live like `attention`; the companion app validates report action
+# links against it.
+#
 # Read-only: it never writes a file, never prunes expired pauses (they are only
 # filtered out of the output), and calls launchctl with `print` only. No
 # network; finishes well under a second. Exit 0 whenever it printed, 2 on a bad
@@ -197,7 +201,8 @@ DOC="$(jq -nc \
         elif ($root | startswith($home + "/")) then "~" + $root[($home | length):]
         else $root end;
 
-    ( [ ($run.unseen // [])[]
+    def classify($entries):
+      [ $entries[]
         | . as $e
         | ([$e.ids[] | select(acked($e.src; $e.pkg; .) | not)]) as $open
         | ([$e.ids[] | select(acked($e.src; $e.pkg; .))]) as $ack
@@ -206,7 +211,10 @@ DOC="$(jq -nc \
             version: $e.version, eco: $e.eco, sev: $e.sev, crit: (($e.sev // 0) >= 9),
             fix: $e.fix, ids_open: $open, ids_acked: $ack,
             anchor: $e.anchor, project_anchor: $e.project_anchor } ]
-      | sort_by([-(.sev // 0), .project, .pkg]) ) as $attention
+      | sort_by([-(.sev // 0), .project, .pkg]);
+
+    classify($run.unseen // []) as $attention
+  | classify($run.active // []) as $active
 
   | {
       schema: 1,
@@ -220,6 +228,8 @@ DOC="$(jq -nc \
       },
       attention: $attention,
       attention_ids: ([$attention[].ids_open | length] | add // 0),
+      active: $active,
+      active_ids: ([$active[].ids_open | length] | add // 0),
       report: { path: $report, exists: $report_exists,
                 opened_epoch: ($opened_raw | gsub("\\s"; "") | intornull) },
       schedule: {
