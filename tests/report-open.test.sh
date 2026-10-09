@@ -6,9 +6,10 @@
 #     (p-<h12(src)>, f-<h12(src\0pkg)>) matching osv-run.json's anchors
 #   - the report embeds a hashchange/load script that jumps to an anchor
 #   - `--open` (no anchor) opens the plain report and stamps osv-report-opened
-#   - `--open --at <anchor>` opens `file://$REPORT#<anchor>` via osascript,
-#     falling back to plain `open` when osascript fails — either way the
-#     opened stamp is written
+#   - `--open --at <anchor>` opens a jump page next to the report that
+#     redirects to `<report>#<anchor>` (open(1)/LaunchServices drop fragments
+#     on file: URLs), falling back to plain `open` of the report when the jump
+#     page can't be written — either way the opened stamp is written
 #   - `--at` without `--open`, and an invalid anchor, both exit 2
 #
 # Fully offline: osv-scanner, osascript and open are stubs on
@@ -126,23 +127,26 @@ stamp_fresh="no"
 [ -s "$HIVEGUARD_REPORT_OPENED" ] && [ "$(( $(date +%s) - $(cat "$HIVEGUARD_REPORT_OPENED") ))" -lt 5 ] && stamp_fresh="yes"
 check "--open stamps osv-report-opened" "yes" "$stamp_fresh"
 
-# --- 4. --open --at <anchor>: osascript with the exact fragment URL ---------
+# --- 4. --open --at <anchor>: opens a jump page that redirects to report#anchor
 A="f-$(h12pkg "$SRC" fast-uri)"
+JUMP="$(dirname "$REPORT")/osv-open-at.html"
 rm -f "$T_LOG_OPEN" "$T_LOG_OSASCRIPT" "$HIVEGUARD_REPORT_OPENED"
 "$HG/bin/osv-daily" --open --at "$A" >/dev/null 2>&1; rc=$?
 check "--open --at exits 0" "0" "$rc"
-check "--open --at calls osascript with file://report#anchor" "1" \
-  "$(grep -c "open location \"file://$REPORT#$A\"" "$T_LOG_OSASCRIPT" 2>/dev/null)"
-check "--open --at never falls back to plain open (osascript succeeded)" "absent" \
-  "$([ -e "$T_LOG_OPEN" ] && echo present || echo absent)"
+check "--open --at opens the jump page" "$JUMP" "$(cat "$T_LOG_OPEN" 2>/dev/null)"
+check "jump page redirects to report#anchor" "1" \
+  "$(grep -c "location.replace(\"$(basename "$REPORT")#$A\")" "$JUMP" 2>/dev/null)"
+check "--open --at never calls osascript" "absent" \
+  "$([ -e "$T_LOG_OSASCRIPT" ] && echo present || echo absent)"
 stamp_fresh="no"
 [ -s "$HIVEGUARD_REPORT_OPENED" ] && [ "$(( $(date +%s) - $(cat "$HIVEGUARD_REPORT_OPENED") ))" -lt 5 ] && stamp_fresh="yes"
 check "--open --at stamps osv-report-opened too" "yes" "$stamp_fresh"
 
-# --- 5. --open --at falls back to plain open when osascript fails ------------
-rm -f "$T_LOG_OPEN" "$T_LOG_OSASCRIPT"
-STUB_OSASCRIPT_RC=1 "$HG/bin/osv-daily" --open --at "$A" >/dev/null 2>&1
-check "osascript failure falls back to plain open" "$REPORT" "$(cat "$T_LOG_OPEN" 2>/dev/null)"
+# --- 5. --open --at falls back to plain open when the jump page can't be written
+rm -f "$T_LOG_OPEN" "$JUMP"; mkdir "$JUMP"
+"$HG/bin/osv-daily" --open --at "$A" >/dev/null 2>&1
+check "unwritable jump page falls back to plain open" "$REPORT" "$(cat "$T_LOG_OPEN" 2>/dev/null)"
+rmdir "$JUMP"
 
 # --- 6. argument validation ---------------------------------------------------
 "$HG/bin/osv-daily" --at "$A" >/dev/null 2>&1

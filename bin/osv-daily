@@ -168,13 +168,23 @@ write_opened() {
   mkdir -p "$(dirname "$OPENED")" 2>/dev/null || true
   date +%s > "$OPENED.tmp" && mv "$OPENED.tmp" "$OPENED"
 }
-# Open the report, jumping to $AT_ANCHOR when set. open(1) drops URL fragments
-# on file: URLs, so a non-empty anchor goes through `osascript ... open
-# location` instead (AppleScript keeps the fragment); falls back to plain
-# `open` if osascript fails. Always stamps the opened file either way.
+# Open the report, jumping to $AT_ANCHOR when set. LaunchServices drops URL
+# fragments on file: URLs before the browser sees them (both open(1) and
+# AppleScript `open location`), so a non-empty anchor writes a tiny jump page
+# next to the report (osv-open-at.html) that redirects inside the browser to
+# `<report>#<anchor>` — a relative URL, so the report path needs no escaping;
+# the anchor is already validated as [pf]-<12 hex>. If the jump page can't be
+# written, plain `open` of the report. Always stamps the opened file.
 open_report() {
   if [ -n "$AT_ANCHOR" ]; then
-    osascript -e "open location \"file://$REPORT#$AT_ANCHOR\"" >/dev/null 2>&1 || open "$REPORT"
+    local jump
+    jump="$(dirname "$REPORT")/osv-open-at.html"
+    if printf '<!doctype html><meta charset="utf-8"><title>hiveguard</title><script>location.replace("%s#%s")</script>\n' \
+         "$(basename "$REPORT")" "$AT_ANCHOR" > "$jump" 2>/dev/null; then
+      open "$jump"
+    else
+      open "$REPORT"
+    fi
   else
     open "$REPORT"
   fi

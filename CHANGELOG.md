@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `hiveguard daily --open --at <anchor>` now actually lands on the row: macOS
+  dropped the `#anchor` of a `file:` URL before the browser saw it, so the report
+  opened at the top. It now opens a small jump page next to the report
+  (`~/.hiveguard/osv-open-at.html`) that redirects to the anchor inside the browser.
+
 ## [1.6.3] - 2026-10-14
 
 ### Fixed
