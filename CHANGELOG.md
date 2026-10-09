@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Report action buttons: when the companion menu bar app is running at scan time, the
+  report's active rows and project cards get *mark as known*, *mark project as known*
+  and (with strict mode on) *pause strict 1 h / 2 h* buttons that hand off to the app,
+  which asks for confirmation and validates against the current state. The terminal
+  command stays behind a small `copy` button; without the app the report is unchanged.
+  The link format is documented in `docs/report-links.md`.
+- `osv-run.json` now records `active`, every active finding of the run.
+- `hiveguard status --json` gains `active[]` and `active_ids` (additive, schema stays 1).
+
 ### Fixed
 - `hiveguard daily --open --at <anchor>` now actually lands on the row: macOS
   dropped the `#anchor` of a `file:` URL before the browser saw it, so the report

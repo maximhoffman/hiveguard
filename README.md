@@ -386,6 +386,13 @@ When everything active is acknowledged, the report shows zero and the daily noti
 stays quiet (until a new advisory pierces a mute). The `<path>` is the source path
 (lockfile/manifest) shown on each project row.
 
+**With the companion app running** when a scan writes the report, the active rows and
+project cards also show buttons that act through the app: *mark as known*, *mark project
+as known*, and (when strict mode is on) *pause strict 1 h* / *2 h*. The app always asks
+for confirmation and checks the request against the current state before changing
+anything; the terminal command stays one click away behind the small *copy* button. The
+link grammar is in [`docs/report-links.md`](docs/report-links.md).
+
 ### Folder markers
 
 Once the daily scan is running over your folders (see
@@ -576,7 +583,8 @@ and a notification when something needs attention. It is a thin client — it re
 `hiveguard status --json` (contract: [`docs/status-json.md`](docs/status-json.md)) and
 shells out to `hiveguard`/`bin/osv-daily` for every action; nothing in this repository
 depends on it, and `hiveguard daily`'s own per-scan notification hands off to it (steps
-aside) while its pid is alive. It is not part of this repo and not published yet — see
+aside) while its pid is alive. While it runs, the report's buttons hand off to it too
+(see [`docs/report-links.md`](docs/report-links.md)). It is not part of this repo and not published yet — see
 the sibling checkout if you have it.
 
 ---
@@ -631,7 +639,7 @@ untouched; nothing is lost in the move.
 | `osv-daily.log` | One line per scan (counts + new/resolved). |
 | `osv-acks.json` | Your acknowledgements (advisory-scoped mutes). |
 | `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed. Override with `HIVEGUARD_STATE`. |
-| `osv-run.json` | Outcome of the last daily run that reached the scan step — ok/failed, counts, the findings new in that run and still-unseen ones carried over until the report is opened. What `hiveguard status` reads. Override `HIVEGUARD_RUN`. |
+| `osv-run.json` | Outcome of the last daily run that reached the scan step — ok/failed, counts, the findings new in that run, still-unseen ones carried over until the report is opened, and every active finding of the run. What `hiveguard status` reads. Override `HIVEGUARD_RUN`. |
 | `osv-daily.pid` | Pid of a daily scan currently in progress; removed when the run ends. Override `HIVEGUARD_SCAN_PID`. |
 | `osv-report-opened` | Epoch timestamp of the last time the report was opened via `hiveguard daily --open`. Override `HIVEGUARD_REPORT_OPENED`. |
 | `osv-markers.tsv` | Flagged project folders — `root<TAB>status<TAB>summary`, drives Finder tags, the terminal reminder, and strict mode. |
