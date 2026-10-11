@@ -256,9 +256,12 @@ hiveguard daily ~/work ~/code    # multiple folders allowed
 
 `daily` needs **at least one folder** — there is no whole-home default. (Scanning the
 whole home folder as a background agent is slow and, on macOS, the OS blocks it from
-reading protected folders like Documents/Desktop, so it silently finds nothing.) A fixed
-set of heavyweight/system directories (`Library`, `Caches`, `node_modules`, `.git`,
-`.cargo`, `go`, …) is excluded so pointing at a large tree stays fast.
+reading protected folders like Documents/Desktop, so it silently finds nothing.) Folders
+that hold other people's packages are skipped at any depth — `.git`, `node_modules`,
+package-manager caches (`.npm`, `.bun`, `.pnpm-store`, `.cargo`, …) and tool homes
+(`.claude`, `.codex`, `.vscode`, `.cursor`, …) — plus `Library`, `Applications`, `Caches`
+and `go` directly in your home folder. A folder you scan is never skipped because of its
+own location (a worktree under `.claude/worktrees` is still scanned when it's the target).
 
 Report: `~/.hiveguard/osv-projects.html`. Log: `~/.hiveguard/osv-daily.log`.
 
@@ -474,7 +477,9 @@ Rules, in order:
   through.
 - **Unknown or stale** (no marker, and no scan of this folder in the last 7 days) →
   runs now, and kicks off one debounced background scan. Nothing to wait for — but if
-  that scan finds something, the **next** attempt is blocked.
+  that scan finds something, the **next** attempt is blocked. The exception is a command
+  run from your home folder itself (or above it, e.g. `/`): it just runs, with no
+  background scan — scanning the whole home folder would flag every tool cache in it.
 
 Intercepted (the default set — extend it with `strict_commands_extra=<space-separated
 names>` in `~/.hiveguard/config`):

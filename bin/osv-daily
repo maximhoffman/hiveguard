@@ -132,14 +132,21 @@ fi
 TARGET_STR=""
 [ "${#TARGETS[@]}" -gt 0 ] && TARGET_STR="${TARGETS[*]}"
 
-# Directory exclusions always passed to osv-scanner (exact dirname match, via its
-# repeatable --experimental-exclude). A whole-home scan would otherwise crawl
-# huge system/cache trees; these are the non-repo heavyweights. osv-scanner
-# already skips .gitignore'd files, which covers in-repo node_modules etc.
-# Harmless on small/explicit targets (a dirname simply won't be present).
-EXCLUDE_DIRS=(Library Caches .cache .Trash .git node_modules .cargo .rustup .npm go .gradle .m2 Applications)
-EXCLUDE_ARGS=()
-for _d in "${EXCLUDE_DIRS[@]}"; do EXCLUDE_ARGS+=(--experimental-exclude "$_d"); done
+# Directory exclusions passed to osv-scanner (built below, once the targets are
+# known). osv-scanner already skips .gitignore'd files, which covers most
+# in-repo node_modules; these keep a broad target from crawling trees that hold
+# OTHER people's packages — which come back as dozens of red "projects" the user
+# can't fix.
+#   EXCLUDE_ANY  — skipped at any depth below a target: VCS/build/package caches
+#                  and tool homes (package managers, editor/agent plugin stores).
+#                  Inside a repo they are tool state, not the project
+#                  (`.claude/worktrees/*` would only duplicate the repo's findings).
+#   EXCLUDE_HOME — skipped only directly in $HOME (~/Library, ~/go, …): inside a
+#                  repo a `go/` or `Library/` folder can be real project code.
+EXCLUDE_ANY=(.git node_modules .cache .Trash .cargo .rustup .npm .gradle .m2
+  .bun .pnpm-store .deno .nvm .pyenv .rbenv .gem .claude .codex .cursor .vscode
+  .vscode-server .lmstudio .serena .tldrc .ollama)
+EXCLUDE_HOME=(Library Applications Caches go)
 
 REPORT="$HOME/.hiveguard/osv-projects.html"
 STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
@@ -276,6 +283,23 @@ for _t in "${TARGETS[@]}"; do CANON_TARGETS+=("$(canon_path "$_t")"); done
 SCAN_TARGETS=""
 [ "${#CANON_TARGETS[@]}" -gt 0 ] && SCAN_TARGETS="$(printf '%s\n' "${CANON_TARGETS[@]}")"
 
+# osv-scanner (verified on 2.6.0) ignores the documented bare-dirname form of
+# --experimental-exclude entirely, and matches g:/r: patterns against the
+# ABSOLUTE path as given (symlinks unresolved) minus the leading `/`. So an
+# unanchored pattern would also drop a target that merely LIVES under such a
+# name (a worktree in .claude/worktrees, a project in ~/go/src). Anchor one
+# regex per target instead (RE2 \Q…\E quotes the path), and hand osv-scanner
+# the same absolute, unresolved paths the regexes were built from.
+_alt() { printf '%s|' "$@" | sed 's/\./\\./g; s/|$//'; }
+EXCLUDE_ARGS=()
+OSV_TARGETS=()
+for _t in "${TARGETS[@]}"; do
+  _a="$(cd "$_t" 2>/dev/null && pwd)" || _a="$_t"
+  OSV_TARGETS+=("$_a")
+  EXCLUDE_ARGS+=(--experimental-exclude "r:^\\Q${_a#/}\\E/(.*/)?($(_alt "${EXCLUDE_ANY[@]}"))(/|\$)")
+done
+EXCLUDE_ARGS+=(--experimental-exclude "r:^\\Q${HOME#/}\\E/($(_alt "${EXCLUDE_HOME[@]}"))(/|\$)")
+
 # Scan in progress: a non-probe run records its pid right before the scanner
 # starts (the EXIT trap removes it) and notes the start time for osv-run.json.
 STARTED="$(date +%s)"
@@ -299,7 +323,7 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
   # stderr->ERRFILE (osv-scanner prints its "Scanned … found N packages" walk
   # progress on stderr). $SECONDS resets to give whole-second elapsed cheaply.
   SECONDS=0
-  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>"$ERRFILE" &
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${OSV_TARGETS[@]}" > "$JSON" 2>"$ERRFILE" &
   _scan_pid=$!
   _spin='-\|/'; _i=0
   while kill -0 "$_scan_pid" 2>/dev/null; do
@@ -327,7 +351,7 @@ if [ "$SHOW_PROGRESS" = 1 ]; then
     grep -v '^Scanned ' "$ERRFILE" 2>/dev/null | tail -5 >&2 || true
   fi
 else
-  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${TARGETS[@]}" > "$JSON" 2>"$ERRFILE" || scan_rc=$?
+  osv-scanner scan source --recursive --format json "${EXCLUDE_ARGS[@]}" "${OSV_TARGETS[@]}" > "$JSON" 2>"$ERRFILE" || scan_rc=$?
 fi
 # Did the scanner actually produce results? osv-scanner exits 1 when it FOUND
 # vulnerabilities (not an error) and >1 on a real failure (e.g. 128 = no package

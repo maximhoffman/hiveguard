@@ -184,6 +184,18 @@ is "H/unknown: runs" 'rc=0' "$ZOUT"
 sleep 1
 is "H/unknown: root falls back to the cwd" "strict _bgscan $T/loose/dir" \
    "$(tail -n1 "$T/bgcalls")"
+# …but never when that fallback is the home folder or above it: a whole-home
+# scan crawls tool caches and plugins and paints them all red. Run, don't scan.
+rm -f "$HIVEGUARD_STRICT_ATTEMPTS" "$T/bgcalls"
+zrun "source $STRICT; cd \$HOME; npm test >/dev/null; print rc=\$?; cd /; npm test >/dev/null; print rc=\$?"
+is "H/home: runs from the home folder and from /" 'rc=0
+rc=0' "$ZOUT"
+sleep 1
+if [[ ! -e $HIVEGUARD_STRICT_ATTEMPTS && ! -e $T/bgcalls ]]; then
+  ok "H/home: no attempts row, no background scan"
+else
+  bad "H/home: no attempts row, no background scan" "files were created"
+fi
 
 # =============================================================================
 # I. The hot path does not fork — any fork dies under `ulimit -u 1`

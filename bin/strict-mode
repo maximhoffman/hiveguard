@@ -343,6 +343,17 @@ case "$verb" in
     [ -n "$root" ] || { echo "usage: hiveguard strict _bgscan [--dry-run] <root>" >&2; exit 2; }
     root="$(canon_path "$root")"
 
+    # The guard never asks for the home folder or above; refuse it here too, so
+    # no caller can turn a probe into a whole-home scan.
+    home="$(canon_path "$HOME")"
+    if [ "$root" = / ] || [ "$root" = "$home" ] || [ "${home#"$root"/}" != "$home" ]; then
+      if [ "$dry" = 1 ]; then echo "skip $root"; exit 0; fi
+      mkdir -p "$(dirname "$STRICT_LOG")"
+      printf '[%s] bgscan %s → skipped (home folder or above)\n' \
+        "$(date '+%Y-%m-%d %H:%M')" "$root" >> "$STRICT_LOG"
+      exit 0
+    fi
+
     mode=probe
     while IFS= read -r f; do
       [ -n "$f" ] || continue

@@ -135,6 +135,10 @@ check "status: says (none) with no pauses left" 1 \
 # --- _bgscan (dry run only — a real scan is never started here) ---------------
 check "_bgscan: no schedule at all → probe" "probe $T/proj/app" \
   "$("$SM" _bgscan --dry-run "$T/proj/app")"
+check "_bgscan: the home folder itself → skip" "skip $HOME" \
+  "$("$SM" _bgscan --dry-run "$HOME")"
+check "_bgscan: above the home folder → skip" "skip /" \
+  "$("$SM" _bgscan --dry-run /)"
 
 cat > "$HIVEGUARD_SCHED_PLIST" <<EOF
 <plist><dict><key>ProgramArguments</key><array><string>/x/hiveguard</string><string>daily</string><string>$T/proj</string><string>--if-due</string></array></dict></plist>

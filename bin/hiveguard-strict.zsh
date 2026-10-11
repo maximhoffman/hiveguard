@@ -291,6 +291,11 @@ else print -u2 -r -- "hiveguard strict: guard not loadable, running '$c' uncheck
     done
     [[ -n $root ]] || root=$cur
 
+    # Never scan the home folder or anything above it (a command typed in ~ or
+    # /): that crawls every tool cache and plugin under ~ and paints them red.
+    local home="${HOME:A}"
+    [[ $root == / || $home == "$root" || $home == "$root"/* ]] && return 0
+
     # Debounce: one background scan per project per freshness window.
     local att="${HIVEGUARD_STRICT_ATTEMPTS:-$HOME/.hiveguard/strict-attempts.tsv}"
     _hiveguard_strict_col2 "$att" "$root" exact

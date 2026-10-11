@@ -6,6 +6,19 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Scan exclusions never worked: osv-scanner (2.6.0) silently ignores the bare
+  folder-name form hiveguard passed, so `node_modules`, `.git`, `Library`, `go` and
+  the rest were all scanned. Exclusions are now passed as patterns anchored to each
+  scanned folder, so a folder you scan is never dropped because of where it lives.
+- Package caches and tool homes (`.bun`, `.pnpm-store`, `.deno`, `.nvm`, `.pyenv`,
+  `.claude`, `.codex`, `.cursor`, `.vscode`, `.lmstudio`, `.serena`, …) are now skipped,
+  so other people's packages no longer show up as red "projects". `Library`,
+  `Applications`, `Caches` and `go` are skipped only directly in the home folder.
+- Strict mode no longer starts a background scan of the whole home folder when a
+  guarded command runs in `~` (or `/`) outside any git repo; the command just runs.
+  Such a scan used to mark dozens of cache and plugin folders red, permanently.
+
 ## [1.6.2] - 2026-10-11
 
 ### Fixed
