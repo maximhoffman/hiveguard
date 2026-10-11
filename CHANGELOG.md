@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-10-11
+
 ### Fixed
 - The bumblebee install guard no longer breaks `npm`, `pnpm`, `yarn`, `bun`, `pip`,
   `go` and `cargo` with `command not found: _bb_node_guard` (exit 127) in Claude
@@ -197,7 +199,8 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/maximhoffman/hiveguard/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/maximhoffman/hiveguard/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/maximhoffman/hiveguard/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/maximhoffman/hiveguard/compare/v1.4.1...v1.5.0
