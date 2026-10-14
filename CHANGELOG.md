@@ -6,46 +6,51 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-14
+
+Report actions through the companion menu bar app, and a report that updates the
+moment you acknowledge something. The app is optional: without it the report looks
+and works as before.
+
 ### Added
-- Report project cards are headed by the lockfile's folder name (e.g. `macmigrate`),
-  with the path beneath in small type — shorter heads, easier to scan. A generic
-  folder name (`go`, `app`, `src`, `server`, …) is shown with its parent
-  (`reconnect-ident / go`); a folder with several lockfiles tags each card with its
-  package manager (`npm`, `pnpm`, …).
-- After a report button is clicked, the report reloads itself once you come back to it
-  from the app's confirmation dialog (keeping the scroll position and the open project
-  cards), so a confirmed *mark as known* shows up without a manual reload. A row or
-  project card that left is replaced for a moment by a highlighted "✓ … — marked as
-  known" note that fades out. Only in reports rendered while the app is running.
-- Report action buttons: when the companion menu bar app is running at scan time, the
-  report's active rows and project cards get *mark as known*, *mark project as known*
-  and (with strict mode on) *pause strict 1 h / 2 h* buttons that hand off to the app,
-  which asks for confirmation and validates against the current state. The terminal
-  command stays behind a small `copy` button; without the app the report is unchanged.
-  The link format is documented in `docs/report-links.md`.
-- `osv-run.json` now records `active`, every active finding of the run.
-- `hiveguard status --json` gains `active[]` and `active_ids` (additive, schema stays 1).
-- `hiveguard daily --render`: rebuilds the report from the last scan's saved results and
-  the current acknowledgements. No scan, no network, no notification; the diff baseline,
-  `osv-run.json` and the coverage stay as the scan left them, and the report keeps the
-  scan's timestamp and modification time.
-- `osv-last-scan.json` now saves the findings the report is built from (`render`
-  block, additive).
+- **Report action buttons.** When the companion menu bar app is running at scan time,
+  active rows and project cards get *mark as known*, *mark project as known* and (with
+  strict mode on) *pause strict 1 h / 2 h* buttons. They hand off to the app, which
+  checks the request against the current state and always asks for confirmation; the
+  terminal command stays behind a small `copy` button. Without the app the report is
+  unchanged. Link format: `docs/report-links.md`.
+- **The report updates right after an acknowledgement.** `hiveguard daily --render`
+  rebuilds the report from the last scan's saved results and the current
+  acknowledgements — no scan, no network, no notification, under a second; the report
+  keeps the scan's timestamp and modification time, so the daily scan still runs.
+- **The report reloads itself** once you come back to it from the app's confirmation
+  dialog, keeping the scroll position and the open project cards; a row or card that
+  left is replaced for a moment by a highlighted "✓ … — marked as known" note that
+  fades out. Only in reports rendered while the app is running.
+- **Shorter project card heads:** the lockfile's folder name in bold (e.g.
+  `macmigrate`) with the path beneath in small type. A generic folder name (`go`,
+  `app`, `src`, `server`, …) is shown with its parent (`reconnect-ident / go`); a
+  folder with several lockfiles tags each card with its package manager (`npm`,
+  `pnpm`, …).
+- `osv-last-scan.json` saves the findings the report is built from (`render` block,
+  additive). Re-rendering works once a scan made with this version has run; until then
+  `ack` behaves as before and says so.
+- `osv-run.json` records `active`, every active finding of the run;
+  `hiveguard status --json` gains `active[]` and `active_ids` (additive, schema stays 1).
 
 ### Changed
-- `hiveguard ack` (mute, `--remove`, `--clear`) re-renders the report and refreshes
-  the folder markers right away, so a reload shows the row in its new section and a fully
-  acknowledged project is no longer blocked by strict mode at the next prompt; before,
+- `hiveguard ack` (mute, `--remove`, `--clear`) re-renders the report and refreshes the
+  folder markers right away: a reload shows the row in its new section, and a fully
+  acknowledged project is no longer blocked by strict mode at the next prompt. Before,
   both changed only at the next scan.
 
 ### Fixed
-- Report action buttons open their `hiveguard://` link in a new tab: followed in the
-  report's own tab, Opera and other Chromium browsers closed the report after handing
-  the link to the app.
-- `hiveguard daily --open --at <anchor>` now actually lands on the row: macOS
-  dropped the `#anchor` of a `file:` URL before the browser saw it, so the report
-  opened at the top. It now opens a small jump page next to the report
-  (`~/.hiveguard/osv-open-at.html`) that redirects to the anchor inside the browser.
+- `hiveguard daily --open --at <anchor>` now lands on the row: macOS dropped the
+  `#anchor` of a `file:` URL before the browser saw it, so the report opened at the top.
+  It now opens a small jump page next to the report (`~/.hiveguard/osv-open-at.html`)
+  that redirects to the anchor inside the browser.
+- Report action buttons open their link in a new tab: followed in the report's own tab,
+  Opera and other Chromium browsers closed the report after handing the link to the app.
 
 ## [1.6.3] - 2026-10-14
 
