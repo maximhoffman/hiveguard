@@ -914,27 +914,76 @@ links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
              "\n.act-link.pause{color:var(--high);border-color:var(--high)}"
              "\n.act-link.pause:hover{background:var(--high);color:#fff}"
              "\n.cp.cp-alt{font-size:10px;padding:2px 6px;opacity:.7}"
-             "\n.cp.cp-alt:hover{opacity:1}") if links_on else ""
+             "\n.cp.cp-alt:hover{opacity:1}"
+             "\n@keyframes hggone{from{background:var(--accent);color:#fff}}"
+             "\n.gone{transition:opacity .8s}"
+             "\n.gone>td,div.gone{background:var(--surface);color:var(--accent);font-family:var(--mono);font-size:12px;padding:8px 12px;outline:2px solid var(--accent);outline-offset:-2px;animation:hggone 1.2s ease-out}"
+             "\ndiv.gone{margin:8px 0;border-radius:8px}"
+             "\n.gone.out{opacity:0}") if links_on else ""
 # links-only: after a button click the page reloads when the user comes back to it
 # (the app's dialog took the focus away), keeping the scroll position and the open
 # project cards. Armed for 2 min after a click; a return counts only after ≥1.2 s
 # away, so the throwaway tab's flash does not use it up — an early reload is
 # harmless (same report), the next return after the dialog shows the result.
-links_js = ("\n<script>\n(function(){\n"
-            "  var K='hiveguard-reload', ARM=120000, AWAY=1200, s=null, away=0;\n"
-            "  try{ s=JSON.parse(sessionStorage.getItem(K)||'null'); }catch(e){}\n"
-            "  if(s){ (s.open||[]).forEach(function(id){ var d=document.getElementById(id); if(d) d.open=true; });\n"
-            "         if(typeof s.y==='number') window.scrollTo(0,s.y); }\n"
-            "  var until=(s&&s.until)||0;\n"
-            "  function save(){ try{ sessionStorage.setItem(K, JSON.stringify({until:until, y:window.scrollY,\n"
-            "    open:[].map.call(document.querySelectorAll('details[open][id]'), function(d){ return d.id; })})); }catch(e){} }\n"
-            "  document.addEventListener('click', function(e){\n"
-            "    if(e.target.closest && e.target.closest('a[href^=\"hiveguard:\"]')){ until=Date.now()+ARM; save(); } }, true);\n"
-            "  window.addEventListener('blur', function(){ if(Date.now()<until) away=Date.now(); });\n"
-            "  window.addEventListener('focus', function(){\n"
-            "    var back=away && Date.now()<until && Date.now()-away>=AWAY; away=0;\n"
-            "    if(back){ save(); location.reload(); } });\n"
-            "})();\n</script>") if links_on else ""
+# An ack click also remembers the row/card and where it stood; once a reload shows it
+# has left the active list, a highlighted note takes its old place for ~2.5 s and
+# fades out (kept until then: an early reload still shows the row).
+links_js = (r'''
+<script>
+(function(){
+  var K='hiveguard-reload', ARM=120000, AWAY=1200, s=null, away=0;
+  try{ s=JSON.parse(sessionStorage.getItem(K)||'null'); }catch(e){}
+  if(s){ (s.open||[]).forEach(function(id){ var d=document.getElementById(id); if(d) d.open=true; });
+         if(typeof s.y==='number') window.scrollTo(0,s.y); }
+  var until=(s&&s.until)||0, leave=(s&&Date.now()<until&&s.leave)||null;
+  function save(){ try{ sessionStorage.setItem(K, JSON.stringify({until:until, leave:leave, y:window.scrollY,
+    open:[].map.call(document.querySelectorAll('details[open][id]'), function(d){ return d.id; })})); }catch(e){} }
+  function active(el){ return !!el && !el.closest('.ackwrap'); }
+  function showGone(){
+    if(!leave || active(document.getElementById(leave.id))) return;
+    var note, card=leave.card && document.getElementById(leave.card);
+    if(leave.kind==='row' && active(card)){
+      var prev=document.getElementById(leave.prev), body=card.querySelector('tbody')||card.querySelector('table');
+      if(!body) return;
+      note=document.createElement('tr'); var td=document.createElement('td');
+      td.colSpan=99; td.textContent='✓ '+leave.label+' — marked as known'; note.appendChild(td);
+      body.insertBefore(note, prev && prev.parentNode===body ? prev.nextSibling : body.firstChild);
+    } else {
+      var cprev=document.getElementById(leave.cardPrev);
+      var first=[].filter.call(document.querySelectorAll('details.proj'), active)[0];
+      var at=active(cprev) ? cprev.nextSibling : (first || document.querySelector('details.ackwrap'));
+      if(!at) return;
+      note=document.createElement('div');
+      note.textContent='✓ '+leave.project+' — marked as known, moved to Acknowledged';
+      at.parentNode.insertBefore(note, at);
+    }
+    note.className='gone'; leave=null; save();
+    note.scrollIntoView({block:'nearest'});
+    setTimeout(function(){ note.classList.add('out'); }, 1800);
+    setTimeout(function(){ if(note.parentNode) note.parentNode.removeChild(note); }, 2700);
+  }
+  showGone();
+  document.addEventListener('click', function(e){
+    var a=e.target.closest && e.target.closest('a[href^="hiveguard:"]');
+    if(!a) return;
+    until=Date.now()+ARM; leave=null;
+    if(/^hiveguard:\/\/ack(-project)?\?/.test(a.getAttribute('href'))){
+      var row=a.closest('tr[id]'), card=a.closest('details.proj[id]'), el=row||card;
+      if(el){
+        var pk=row && row.querySelector('td.pk'), ver=row && row.querySelector('td.mono');
+        var rp=row && row.previousElementSibling, cp=card && card.previousElementSibling, pn=card && card.querySelector('.pname');
+        leave={id:el.id, kind:row?'row':'card', card:card?card.id:'', prev:(rp&&rp.id)||'', cardPrev:(cp&&cp.id)||'',
+               label:row ? (((pk&&pk.firstChild)?pk.firstChild.textContent:'')+' '+(ver?ver.textContent:'')).trim() : '',
+               project:pn ? pn.textContent : ''};
+      }
+    }
+    save(); }, true);
+  window.addEventListener('blur', function(){ if(Date.now()<until) away=Date.now(); });
+  window.addEventListener('focus', function(){
+    var back=away && Date.now()<until && Date.now()-away>=AWAY; away=0;
+    if(back){ save(); location.reload(); } });
+})();
+</script>''') if links_on else ""
 footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
                "“copy” gives the terminal command instead." if links_on else
                "Mute an old project with the “mute” button (→ hiveguard ack).")

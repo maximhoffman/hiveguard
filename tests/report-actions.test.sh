@@ -141,6 +141,9 @@ check "on: every act-link opens in a new tab"  "3" "$(count 'class="act-link[^>]
 # after a button click the page reloads once the user comes back from the app's dialog
 check "on: reload-on-return script, once"      "1" "$(count "var K='hiveguard-reload'")"
 check "on: it arms on a hiveguard: link click"  "1" "$(count "closest('a\[href^=\"hiveguard:\"\]')")"
+# after the reload a row/card that left is replaced for a moment by a highlighted note
+check "on: leaving-row note style, once"        "1" "$(count '\.gone{transition')"
+check "on: leaving-row/card note texts"          "2" "$(count ' — marked as known')"
 check "on: fast-uri ack href" "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=fast-uri\"")"
 check "on: lodash ack href"   "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=lodash\"")"
 check "on: ack-project href"  "1" "$(count "href=\"hiveguard://ack-project?v=1&amp;src=$ENC\"")"
