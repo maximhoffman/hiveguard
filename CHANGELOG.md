@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-10-14
+
 ### Fixed
 - Scan exclusions never worked: osv-scanner (2.6.0) silently ignores the bare
   folder-name form hiveguard passed, so `node_modules`, `.git`, `Library`, `go` and
@@ -212,7 +214,8 @@ Initial Homebrew release.
 ### Removed
 - The `hg` short alias (it collided with Mercurial's `hg`); `hvg` remains.
 
-[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.2...HEAD
+[Unreleased]: https://github.com/maximhoffman/hiveguard/compare/v1.6.3...HEAD
+[1.6.3]: https://github.com/maximhoffman/hiveguard/compare/v1.6.2...v1.6.3
 [1.6.2]: https://github.com/maximhoffman/hiveguard/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/maximhoffman/hiveguard/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/maximhoffman/hiveguard/compare/v1.5.0...v1.6.0
