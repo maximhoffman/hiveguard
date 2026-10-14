@@ -165,6 +165,10 @@ trigger one now:
 hiveguard daily        # regenerate ~/.hiveguard/osv-projects.html right away
 ```
 
+To pick up a changed layout (or an acknowledgement) without scanning,
+`hiveguard daily --render` rebuilds the report from the last scan's saved results
+(available once a scan made with this version has run).
+
 ### Prerequisites
 
 Under Homebrew the required tools (`jq`, `osv-scanner`, `python`) arrive automatically.
@@ -275,12 +279,22 @@ hiveguard daily --open                      # just open the last report, never s
 hiveguard daily --open --at p-3f2a9c1d0b7e   # open the last report, jump straight to that project/finding
 hiveguard daily --rescan   # force a fresh scan now, no prompt
 hiveguard daily --if-due   # scan only if today's report is missing/stale (used by the scheduler)
+hiveguard daily --render   # rebuild the report from the last scan's saved results + current acks (no scan)
 ```
 
 `--at <anchor>` only works together with `--open`. The anchor is one of the ids the
 report embeds on every project card (`p-…`) and finding row (`f-…`) — the same ids
 `hiveguard status --json` hands back as `anchor`/`project_anchor` on each attention
 entry — and the report scrolls to it and highlights it briefly.
+
+`--render` reads the last scan's saved results (the `render` block of
+`~/.hiveguard/osv-last-scan.json`), your current acknowledgements, the config and the
+presence pid files, and rewrites only the report and the Finder markers. The report keeps
+the scan's timestamp and modification time, so `--if-due` and the open-or-rescan prompt
+still see the date of the real scan. The "new since last scan" comparison,
+`osv-run.json` and the coverage are untouched, and no notification is sent. It refuses to
+run while a scan is in progress, and it needs a scan made with this version (otherwise it
+says so and exits). `hiveguard ack` runs it for you after every change.
 
 `hiveguard daily --probe <path>` is internal — [strict mode](#strict-mode) uses it for
 the background scan of an unknown project: it scans just that one root into
@@ -381,7 +395,9 @@ advisories that appear *after* it will pierce the mute.
 
 Every row in the report carries a **mute** / **unmute** button that copies the exact
 command for that project or package — click, paste, run. Acknowledgements persist in
-`~/.hiveguard/osv-acks.json`, so the next scan and the scheduled agent both honour them.
+`~/.hiveguard/osv-acks.json`, so the next scan and the scheduled agent both honour them. Every `hiveguard ack` change
+(mute, `--remove`, `--clear`) re-renders the report and refreshes the folder markers at
+once — reload the report to see the row move; no rescan.
 When everything active is acknowledged, the report shows zero and the daily notification
 stays quiet (until a new advisory pierces a mute). The `<path>` is the source path
 (lockfile/manifest) shown on each project row.
@@ -428,9 +444,9 @@ hiveguard mark clear    # remove EVERYTHING hiveguard placed (tags + state) —
                          # run this before `brew uninstall` / removing hiveguard
 ```
 
-Markers refresh on the **next scan**, not instantly — e.g. after `hiveguard ack`, the
-red→yellow flip on a project's Finder tag appears the next time `hiveguard daily` (or
-the scheduled agent) runs, not the moment you ack. Markers only ever appear for projects
+Markers refresh on every scan **and immediately after every `hiveguard ack` change** —
+the red→yellow flip on a project's Finder tag happens the moment you ack, and strict mode
+stops refusing the project at the next prompt. Markers only ever appear for projects
 the daily scan actually covers, so this feature is only useful once you've set up
 `hiveguard schedule on <folders>` (or run `hiveguard daily <folders>` yourself).
 
@@ -638,7 +654,7 @@ untouched; nothing is lost in the move.
 | `osv-projects.html` | The latest daily report. |
 | `osv-daily.log` | One line per scan (counts + new/resolved). |
 | `osv-acks.json` | Your acknowledgements (advisory-scoped mutes). |
-| `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed. Override with `HIVEGUARD_STATE`. |
+| `osv-last-scan.json` | The scan state / diff baseline — how "new since last scan" is computed — and, under `render`, the saved findings the report is rebuilt from by `hiveguard daily --render`. Override with `HIVEGUARD_STATE`. |
 | `osv-run.json` | Outcome of the last daily run that reached the scan step — ok/failed, counts, the findings new in that run, still-unseen ones carried over until the report is opened, and every active finding of the run. What `hiveguard status` reads. Override `HIVEGUARD_RUN`. |
 | `osv-daily.pid` | Pid of a daily scan currently in progress; removed when the run ends. Override `HIVEGUARD_SCAN_PID`. |
 | `osv-report-opened` | Epoch timestamp of the last time the report was opened via `hiveguard daily --open`. Override `HIVEGUARD_REPORT_OPENED`. |

@@ -18,7 +18,9 @@ the app validates links against is described in [`docs/status-json.md`](status-j
   actually block.
 - Otherwise the report carries no links and looks exactly as it did before links existed.
 - Only the Active section has link buttons; the Acknowledged section is unchanged.
-
+- The same gate applies when the report is re-rendered after an acknowledgement
+  (`hiveguard daily --render`, run by `hiveguard ack`): links appear iff the app is
+  running at render time.
 ## Grammar
 
 ```
@@ -79,7 +81,10 @@ Any web page can fire a custom-scheme URL, so every link is treated as untrusted
 - An engine whose status has no `active` key cannot validate `ack` links; they are
   refused as "hiveguard too old".
 - It runs only the engine verb in the grammar table, never any other.
-- The report is static: it does not update after an action, only at the next scan.
+- After a confirmed `ack` / `ack-project` the engine re-renders the report from the last
+  scan's saved results (`daily --render`) and refreshes the folder markers (no rescan);
+  reload the page.
+  `pause` leaves the report unchanged.
 
 ## The `copy` fallback
 

@@ -15,6 +15,18 @@ adhere to [Semantic Versioning](https://semver.org/).
   The link format is documented in `docs/report-links.md`.
 - `osv-run.json` now records `active`, every active finding of the run.
 - `hiveguard status --json` gains `active[]` and `active_ids` (additive, schema stays 1).
+- `hiveguard daily --render`: rebuilds the report from the last scan's saved results and
+  the current acknowledgements. No scan, no network, no notification; the diff baseline,
+  `osv-run.json` and the coverage stay as the scan left them, and the report keeps the
+  scan's timestamp and modification time.
+- `osv-last-scan.json` now saves the findings the report is built from (`render`
+  block, additive).
+
+### Changed
+- `hiveguard ack` (mute, `--remove`, `--clear`) re-renders the report and refreshes
+  the folder markers right away, so a reload shows the row in its new section and a fully
+  acknowledged project is no longer blocked by strict mode at the next prompt; before,
+  both changed only at the next scan.
 
 ### Fixed
 - Report action buttons open their `hiveguard://` link in a new tab: followed in the
