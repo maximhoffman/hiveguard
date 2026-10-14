@@ -832,8 +832,11 @@ def app_link(action, params, label, title, extra=""):
     # params: ordered [(name, value)]; values percent-encoded with no safe chars
     q = "&".join(k + "=" + urllib.parse.quote(v, safe="") for k, v in params)
     href = "hiveguard://" + action + "?v=1&" + q
+    # target=_blank: a hiveguard:// link followed in the report's own tab makes
+    # Opera/Chromium close that tab after handing the URL to the app; a throwaway
+    # tab is closed instead and the report stays open.
     return (f'<a class="act-link{extra}" href="{html.escape(href)}" '
-            f'title="{title}">{html.escape(label)}</a>')
+            f'title="{title}" target="_blank" rel="noopener">{html.escape(label)}</a>')
 
 def cp_alt(cmd):
     # the terminal command, tucked behind a small secondary copy button

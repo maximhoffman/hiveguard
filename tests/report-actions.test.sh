@@ -135,6 +135,8 @@ strict_off
 # --- 2. app running, strict off → ack links, copy tucked away, no pause -------
 links_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "on: act-link count"                    "3" "$(count 'class="act-link')"
+# a hiveguard:// link followed in the report's own tab makes Opera/Chromium close that tab
+check "on: every act-link opens in a new tab"  "3" "$(count 'class="act-link[^>]*" target="_blank" rel="noopener">')"
 check "on: fast-uri ack href" "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=fast-uri\"")"
 check "on: lodash ack href"   "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=lodash\"")"
 check "on: ack-project href"  "1" "$(count "href=\"hiveguard://ack-project?v=1&amp;src=$ENC\"")"
@@ -147,9 +149,9 @@ check "on: copy button commands"             "1 1" \
 check "on: copy aria-labels"                 "3" "$(count 'aria-label="Copy command: hiveguard ack ')"
 check "on: copy label"                       "3" "$(count '>copy</button>')"
 check "on: row link markup" "1" \
-  "$(count "<span class=\"actg\"><a class=\"act-link\" href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=lodash\" title=\"Mark this finding as known via the HiveGuard app (asks for confirmation)\">mark as known</a><button class=\"cp cp-alt\" type=\"button\" data-cmd=\"hiveguard ack $SRC lodash\" title=\"Copy the terminal command instead\" aria-label=\"Copy command: hiveguard ack $SRC lodash\">copy</button></span>")"
+  "$(count "<span class=\"actg\"><a class=\"act-link\" href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=lodash\" title=\"Mark this finding as known via the HiveGuard app (asks for confirmation)\" target=\"_blank\" rel=\"noopener\">mark as known</a><button class=\"cp cp-alt\" type=\"button\" data-cmd=\"hiveguard ack $SRC lodash\" title=\"Copy the terminal command instead\" aria-label=\"Copy command: hiveguard ack $SRC lodash\">copy</button></span>")"
 check "on: card link markup" "1" \
-  "$(count "<span class=\"actg\"><a class=\"act-link\" href=\"hiveguard://ack-project?v=1&amp;src=$ENC\" title=\"Mark every finding of this project as known via the HiveGuard app (asks for confirmation)\">mark project as known</a><button class=\"cp cp-alt\" type=\"button\" data-cmd=\"hiveguard ack $SRC\" title=\"Copy the terminal command instead\" aria-label=\"Copy command: hiveguard ack $SRC\">copy</button></span>")"
+  "$(count "<span class=\"actg\"><a class=\"act-link\" href=\"hiveguard://ack-project?v=1&amp;src=$ENC\" title=\"Mark every finding of this project as known via the HiveGuard app (asks for confirmation)\" target=\"_blank\" rel=\"noopener\">mark project as known</a><button class=\"cp cp-alt\" type=\"button\" data-cmd=\"hiveguard ack $SRC\" title=\"Copy the terminal command instead\" aria-label=\"Copy command: hiveguard ack $SRC\">copy</button></span>")"
 check "on: CSS and footer"                   "1 1" \
   "$(count '\.act-link{') $(count 'Buttons act through the HiveGuard menu bar app (it asks before changing anything); “copy” gives the terminal command instead.')"
 check "on: historical footer sentence gone"  "0" "$(count 'Mute an old project with the “mute” button')"

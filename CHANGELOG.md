@@ -17,6 +17,9 @@ adhere to [Semantic Versioning](https://semver.org/).
 - `hiveguard status --json` gains `active[]` and `active_ids` (additive, schema stays 1).
 
 ### Fixed
+- Report action buttons open their `hiveguard://` link in a new tab: followed in the
+  report's own tab, Opera and other Chromium browsers closed the report after handing
+  the link to the app.
 - `hiveguard daily --open --at <anchor>` now actually lands on the row: macOS
   dropped the `#anchor` of a `file:` URL before the browser saw it, so the report
   opened at the top. It now opens a small jump page next to the report
