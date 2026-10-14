@@ -9,6 +9,7 @@
 #   osv-daily --rescan     # force a fresh scan now (never prompts)
 #   osv-daily --if-due     # scan only if today's report is missing/stale
 #   osv-daily --probe <p>  # internal: scan ONE project root into its own report
+#   osv-daily --render     # rebuild the last report from the saved scan results + current acks (no scan)
 #   osv-daily -h|--help    # show this help
 #
 # With no path, the scan falls back to the folders configured for the daily
@@ -31,7 +32,8 @@
 # section. A genuinely NEW advisory in a muted item still surfaces and alerts
 # ("new pierces the mute"); re-run `hiveguard ack` to fold it in.
 # The scan also writes ~/.hiveguard/osv-last-scan.json (override: HIVEGUARD_STATE)
-# — the last scan's summary and the baseline for the "new since last scan" diff.
+# — the last scan's summary and the baseline for the "new since last scan" diff,
+# and, under `render`, the normalised findings the report is built from.
 # Every successful scan also upserts one row per scanned folder into
 # ~/.hiveguard/osv-coverage.tsv (override: HIVEGUARD_COVERAGE), `folder<TAB>epoch`
 # — how strict mode tells a never-scanned project from a known-clean one.
@@ -68,6 +70,23 @@
 # app always asks for confirmation; the terminal command stays behind a small
 # "copy" button. --probe reports never carry links, and with the app not
 # running the report is exactly as before. Grammar: docs/report-links.md.
+#
+# Re-rendering: --render rebuilds the daily report without scanning, from the
+# saved scan results (the `render` block of osv-last-scan.json) and the CURRENT
+# acknowledgements, through the same code the scan uses — so right after a scan
+# it reproduces that scan's report byte for byte, and after an ack change it is
+# what a scan with those acks would have written. `hiveguard ack` (mute,
+# --remove, --clear) runs it after every change. It reads the state, the ack
+# store, the config and the app/scan pid files; the app and strict gates of the
+# action buttons apply at render time. It writes the report (atomically, keeping
+# the report's modification time — the scan's — so --if-due and the
+# open-or-rescan gate never see a fresh report because of an ack), re-syncs the
+# folder markers with the saved scan targets, and logs one `render` line. It
+# never writes the state, osv-run.json, the coverage file, the opened stamp, the
+# scan pid file, the probe report or the ack store, and never notifies.
+# Exit codes: 0 rendered; 1 render failed; 2 usage; 3 nothing to render from
+# (no saved scan, or one that predates re-rendering — run a scan); 4 a scan is
+# in progress (it writes a fresh report itself).
 set -euo pipefail
 export PATH="${HIVEGUARD_TOOL_PATH:+$HIVEGUARD_TOOL_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
@@ -80,6 +99,7 @@ print_header() {
 usage_err() {
   echo "usage: osv-daily [--open [--at <anchor>] | --rescan | --if-due] [path...]" >&2
   echo "       osv-daily --probe <path>" >&2
+  echo "       osv-daily --render" >&2
   exit 2
 }
 # Canonicalize a path (resolve symlinks) — best-effort, prints the input on
@@ -93,13 +113,14 @@ canon_path() {
     || printf '%s' "$p"
 }
 
-open_flag=0; rescan_flag=0; ifdue_flag=0; probe_flag=0; PROBE_PATH=""; AT_ANCHOR=""; TARGETS=()
+open_flag=0; rescan_flag=0; ifdue_flag=0; probe_flag=0; render_flag=0; PROBE_PATH=""; AT_ANCHOR=""; TARGETS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) print_header; exit 0 ;;
     --open)    open_flag=1 ;;
     --rescan)  rescan_flag=1 ;;
     --if-due)  ifdue_flag=1 ;;
+    --render)  render_flag=1 ;;
     --at)
       shift
       [ $# -gt 0 ] || { echo "osv-daily: --at needs an anchor" >&2; usage_err; }
@@ -114,8 +135,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ]; }; then
-  echo "osv-daily: --open cannot be combined with --rescan or --if-due" >&2
+if [ "$open_flag" = 1 ] && { [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ] || [ "$render_flag" = 1 ]; }; then
+  echo "osv-daily: --open cannot be combined with --rescan, --if-due or --render" >&2
   exit 2
 fi
 if [ -n "$AT_ANCHOR" ] && [ "$open_flag" != 1 ]; then
@@ -132,11 +153,20 @@ fi
 # path, no mode flags, its own report, no state baseline (see below).
 if [ "$probe_flag" = 1 ]; then
   if [ "$open_flag" = 1 ] || [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ] \
-     || [ "${#TARGETS[@]}" -gt 0 ]; then
-    echo "osv-daily: --probe takes exactly one path and cannot be combined with --open, --rescan or --if-due" >&2
+     || [ "$render_flag" = 1 ] || [ "${#TARGETS[@]}" -gt 0 ]; then
+    echo "osv-daily: --probe takes exactly one path and cannot be combined with --open, --rescan, --if-due or --render" >&2
     exit 2
   fi
   TARGETS=("$PROBE_PATH")
+fi
+# --render rebuilds the last daily report from the saved scan: no path, no
+# other mode (see "Re-rendering" in the header).
+if [ "$render_flag" = 1 ]; then
+  if [ "$rescan_flag" = 1 ] || [ "$ifdue_flag" = 1 ] || [ "$open_flag" = 1 ] \
+     || [ "$probe_flag" = 1 ] || [ "${#TARGETS[@]}" -gt 0 ]; then
+    echo "osv-daily: --render takes no path and cannot be combined with --open, --rescan, --if-due or --probe" >&2
+    exit 2
+  fi
 fi
 # A single, stable, comparable string representing the whole scanned set — used
 # for the report header and the state file's `target` (so a later diff can tell
@@ -216,6 +246,64 @@ open_report() {
   write_opened
 }
 
+# --render: rebuild the daily report from the last scan's saved records and the
+# current acks (see "Re-rendering" in the header). Refuses — one stderr line,
+# every file untouched — when there is nothing to render from (rc 3) or a scan
+# is running (rc 4: its python reads the acks at the end and writes a fresh
+# report; rendering now could overwrite that with the previous scan's data).
+render_report() {
+  if [ ! -f "$STATE" ]; then
+    echo "osv-daily: no saved scan to render from — run: hiveguard daily <folder>" >&2
+    return 3
+  fi
+  local _spid
+  _spid="$(cat "$SCAN_PID" 2>/dev/null || true)"
+  if [ -f "$SCAN_PID" ] && kill -0 "$_spid" 2>/dev/null; then
+    echo "osv-daily: a scan is in progress (pid $_spid); it writes a fresh report itself" >&2
+    return 4
+  fi
+  ACKS="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
+  COUNTS="$(mktemp)"; MARKS="$(mktemp)"; TARGETS_OUT="$(mktemp)"
+  trap 'rm -f "$COUNTS" "$MARKS" "$TARGETS_OUT"' EXIT
+  LOGDIR="$HOME/.hiveguard"; mkdir -p "$LOGDIR" "$(dirname "$REPORT")"
+  STRICT_ON=0; [ "$(config_get strict 0)" = 1 ] && STRICT_ON=1
+  APP_RUNNING=0; app_running && APP_RUNNING=1
+  local _rc=0
+  RENDER=1 STATE="$STATE" OUT="$REPORT" ACKS="$ACKS" COUNTS="$COUNTS" MARKS="$MARKS" \
+    TARGETS_OUT="$TARGETS_OUT" APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" PROBE=0 \
+    JSON="" RUN="" OPENED="" SCAN_TARGETS="" STAMP="" TARGET="" STARTED="" SCAN_RC="" \
+    report_python || _rc=$?
+  if [ "$_rc" = 3 ]; then
+    return 3            # python printed "the saved scan predates report re-rendering"
+  elif [ "$_rc" != 0 ]; then
+    echo "osv-daily: render failed (python exit $_rc)" >&2
+    return 1
+  fi
+
+  ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
+  ACKED_PROJECTS=0; ACKED_PKGS=0; ACKED_VULNS=0; ACKED_CRIT=0
+  NEW_VULNS=0; RESOLVED_VULNS=0
+  MARK_ACTIVE=0; MARK_ACKED=0; SCAN_STAMP=""
+  [ -f "$COUNTS" ] && . "$COUNTS"
+
+  # Folder markers from the same desired set, with the saved scan targets —
+  # best-effort, exactly as the scan does it.
+  local _t _mark_args=()
+  while IFS= read -r _t; do
+    if [ -n "$_t" ]; then _mark_args+=(--target "$_t"); fi
+  done < "$TARGETS_OUT"
+  if [ "${#_mark_args[@]}" -gt 0 ]; then
+    "$(dirname "$0")/folder-mark" sync "${_mark_args[@]}" < "$MARKS" 2>/dev/null || true
+  fi
+
+  local new_log="" mark_log log_kind="render "
+  if [ "${NEW_VULNS:-0}" -gt 0 ]; then new_log=" new=$NEW_VULNS"; fi
+  mark_log=" markers=R${MARK_ACTIVE:-0},Y${MARK_ACKED:-0}"
+  echo "[$(date '+%Y-%m-%d %H:%M')] ${log_kind}projects=$ACTIVE_PROJECTS pkgs=$ACTIVE_PKGS vulns=$ACTIVE_VULNS crit=$ACTIVE_CRIT$new_log (acked: vulns=$ACKED_VULNS pkgs=$ACKED_PKGS)$mark_log → $REPORT" >> "$LOGDIR/osv-daily.log"
+  echo "✅ report refreshed (scan of $SCAN_STAMP): $ACTIVE_VULNS active vulnerabilities across $ACTIVE_PROJECTS projects ($ACKED_VULNS acknowledged) → $REPORT"
+  return 0
+}
+
 # print the recovered summary from the last scan's state file (Part B).
 print_last_summary() {
   STATE="$STATE" REPORT="$REPORT" python3 - <<'PYEOF' || true
@@ -236,6 +324,882 @@ except Exception:
 PYEOF
 }
 
+# The report python, shared by the scan and --render (one code path, so the two
+# cannot drift). Scan mode (RENDER unset): raw scanner JSON → merged results →
+# baseline → per-package records; render mode (RENDER=1): the records saved in
+# the state's `render` block. Everything after the records (acks, fragments,
+# markers, counts, HTML) is common. Called with an env prefix.
+report_python() {
+  python3 <<'PYEOF'
+import json, os, sys, html, re, shlex, hashlib, time, urllib.parse
+def ig(k, dv=""):
+    return os.environ.get(k, dv)
+
+# RENDER=1 → --render: rebuild the report from the records the last scan saved
+# in the state's `render` block (no scanner JSON, no merge, no baseline).
+render = ig("RENDER", "0") == "1"
+
+# h12 = first 12 hex chars of SHA-1 — the report's DOM anchors (p-/f-, section
+# 2.7) and osv-run.json's "anchor"/"project_anchor" (below) are the SAME ids,
+# computed with this one function, so `hiveguard daily --open --at <id>` from
+# a run-file id always lands on the matching report element.
+def h12(s):
+    return hashlib.sha1(s.encode()).hexdigest()[:12]
+
+# --- dedup scan results by source path -------------------------------------
+# osv-scanner can emit the SAME source.path more than once (multiple extractors
+# over one manifest, e.g. a requirements.txt). Left as-is that double-counts
+# projects/packages/vulns everywhere. Merge results by path up front so every
+# tally, finding, and report row below is computed from one entry per path.
+#   - group results by source.path (keep the first result's other source fields)
+#   - within a group, merge packages by package name: union each package's
+#     vulnerabilities deduped by vuln id (keep the first package dict's other
+#     fields); concatenate groups so the later max_severity is the group maximum.
+def merge_results(results):
+    by_path, order = {}, []
+    for r in results:
+        path = (r.get("source", {}) or {}).get("path", "")
+        grp = by_path.get(path)
+        if grp is None:
+            grp = by_path[path] = {"source": dict(r.get("source", {}) or {}),
+                                   "packages": {}, "order": []}
+            order.append(path)
+        for p in r.get("packages", []) or []:
+            name = (p.get("package", {}) or {}).get("name", "")
+            mp = grp["packages"].get(name)
+            if mp is None:
+                mp = dict(p)   # keep this first package dict's other fields
+                mp["vulnerabilities"] = list(p.get("vulnerabilities") or [])
+                mp["groups"] = list(p.get("groups") or [])
+                grp["packages"][name] = mp
+                grp["order"].append(name)
+            else:
+                seen = {v.get("id") for v in mp["vulnerabilities"]}
+                for v in (p.get("vulnerabilities") or []):
+                    if v.get("id") not in seen:
+                        mp["vulnerabilities"].append(v); seen.add(v.get("id"))
+                mp["groups"].extend(p.get("groups") or [])   # max_severity = max
+    return [{"source": by_path[path]["source"],
+             "packages": [by_path[path]["packages"][n] for n in by_path[path]["order"]]}
+            for path in order]
+
+# --- project roots (records + Finder markers) ------------------------------
+# A finding's source path is a manifest (a file). Its project ROOT is the
+# nearest ancestor of the manifest's directory that contains a .git (dir OR
+# file — worktrees), never walking above the scan target the finding is under;
+# with no .git found, the root is the manifest's own directory. Roots are
+# realpath'd (the terminal hook matches a realpath'd $PWD). Findings under one
+# .git (a monorepo) collapse to ONE root. A root that IS itself a scan target is
+# skipped (a stray manifest in a container dir must not tag the whole container).
+# The canonical scan targets: from argv (SCAN_TARGETS) on a scan, from the
+# saved `render.scan_targets` on --render (set below).
+scan_targets = [os.path.realpath(t) for t in os.environ.get("SCAN_TARGETS", "").split("\n") if t]
+# Under --probe the single scan target IS the project root (strict mode probes a
+# resolved root), so the "a root that is a scan target must not be marked" rule
+# — meant to stop a stray manifest tagging a whole container dir — is disabled.
+probe = os.environ.get("PROBE", "0") == "1"
+# Report action links (hiveguard://, docs/report-links.md): only while the menu
+# bar app is running at report time, never in a probe report. Pause links also
+# need strict mode on (and a root strict would block — a key of root_agg).
+links_on = os.environ.get("APP_RUNNING", "0") == "1" and not probe
+strict_on = os.environ.get("STRICT_ON", "0") == "1"
+
+def finding_root(src):
+    d0 = os.path.realpath(os.path.dirname(src))
+    # the scan target containing this finding (longest matching prefix bounds the walk)
+    bound = None
+    for t in scan_targets:
+        if d0 == t or d0.startswith(t + os.sep):
+            if bound is None or len(t) > len(bound):
+                bound = t
+    if bound is None:
+        bound = d0
+    cur = d0
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        if cur == bound:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:            # filesystem root — stop
+            break
+        cur = parent
+    return d0
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
+
+# --- the per-package records the report is built from ----------------------
+# One record per vulnerable package, in scan iteration order (merged results
+# order; a src's packages contiguous): {src, root, pkg, version, eco, ids
+# (every advisory id, scanner order), id_sev (id → severity from the scanner's
+# groups, max when an id spans groups), maxsev (package max over groups), fix
+# (computed fixed-in version or ""), new_ids (ids absent from the previous
+# scan's baseline; [] when the baseline is not valid)}. A scan saves them in the
+# state's `render` block; --render reads them back instead of scanning.
+if render:
+    with open(os.environ["STATE"]) as f:
+        saved = json.load(f)
+    blk = saved.get("render") if isinstance(saved, dict) else None
+    if not isinstance(blk, dict) or blk.get("schema") != 1:
+        print("osv-daily: the saved scan predates report re-rendering — run: hiveguard daily",
+              file=sys.stderr)
+        sys.exit(3)
+    records = blk["packages"]
+    scan_targets = blk["scan_targets"]
+    stamp, target = saved["stamp"], saved["target"]
+    saved_resolved = saved["counts"]["resolved_vulns"]
+    # hand the saved scan targets back to the shell (folder-mark --target)
+    tf = ig("TARGETS_OUT")
+    if tf:
+        with open(tf, "w") as f:
+            f.write("".join(t + "\n" for t in scan_targets))
+else:
+    d = json.load(open(os.environ["JSON"]))
+    d["results"] = merge_results(d.get("results", []))
+    stamp, target = ig("STAMP"), ig("TARGET")
+
+    # --- baseline for the "new since last scan" diff -----------------------
+    # Read the EXISTING state file BEFORE this run overwrites it at the end. The
+    # diff is valid ONLY when a prior scan exists AND it covered the same target
+    # set — otherwise an absent/mismatched baseline would mark everything "new".
+    prev = None
+    try:
+        with open(os.environ.get("STATE", "")) as f:
+            prev = json.load(f)
+    except Exception:
+        prev = None
+    baseline_findings = (prev or {}).get("findings", {}) or {}
+    baseline_target = (prev or {}).get("target")
+    baseline_valid = prev is not None and baseline_target is not None and baseline_target == target
+
+    records = []
+    root_of = {}
+    for r in d.get("results", []):
+        src = r.get("source", {}).get("path", "")
+        for p in r.get("packages", []):
+            vulns = p.get("vulnerabilities") or []
+            if not vulns: continue
+            info = p.get("package", {})
+            name = info.get("name", "")
+            ids = [v.get("id", "") for v in vulns]
+            maxsev = max((float(g.get("max_severity", "0") or 0) for g in (p.get("groups") or [])), default=0.0)
+            # id → severity from the groups (max when an id spans several groups)
+            id2sev = {}
+            for g in (p.get("groups") or []):
+                try: gs = float(g.get("max_severity", "0") or 0)
+                except Exception: gs = 0.0
+                for gid in (g.get("ids") or []):
+                    if gid not in id2sev or gs > id2sev[gid]:
+                        id2sev[gid] = gs
+            fixes = []
+            for v in vulns:
+                for af in v.get("affected", []) or []:
+                    for rng in af.get("ranges", []) or []:
+                        for e in rng.get("events", []) or []:
+                            if e.get("fixed"): fixes.append(e["fixed"])
+            fix = max(fixes, key=vtuple) if fixes else ""
+            if src not in root_of:
+                root_of[src] = finding_root(src)
+            # advisory ids not present for this (src, pkg) in the previous scan
+            base_ids = baseline_findings.get(src, {}).get(name, []) if baseline_valid else []
+            records.append({
+                "src": src, "root": root_of[src], "pkg": name,
+                "version": info.get("version", ""), "eco": info.get("ecosystem", ""),
+                "ids": ids, "id_sev": id2sev, "maxsev": maxsev, "fix": fix,
+                "new_ids": [i for i in ids if i not in base_ids] if baseline_valid else [],
+            })
+
+# current union of ALL vulnerable findings (active AND acked), from the records
+# — used both for the state file and the resolved-since diff.
+cur_findings = {}
+for rec in records:
+    cur_findings.setdefault(rec["src"], {})[rec["pkg"]] = rec["ids"]
+
+# --- acknowledgements (schema v2, advisory-scoped) -------------------------
+# Read the ack store, tolerant of a v1-shaped store (arrays), which we treat as
+# open-ended (cover-all). Build:
+#   project_ack[src]      = ids-map {pkg:[ids]} | None   (None = cover-all)
+#   package_ack[src][pkg] = ids-list [ids]      | None   (None = cover-all)
+acks_raw = None
+try:
+    with open(os.environ.get("ACKS", "")) as f:
+        acks_raw = json.load(f)
+except Exception:
+    acks_raw = None
+
+project_ack, package_ack = {}, {}
+if isinstance(acks_raw, dict):
+    projs = acks_raw.get("projects")
+    if isinstance(projs, dict):                       # v2: {src: {ids, since}}
+        for src, ent in projs.items():
+            project_ack[src] = (ent or {}).get("ids") if isinstance(ent, dict) else None
+    elif isinstance(projs, list):                     # v1: [src, …] → cover-all
+        for src in projs:
+            project_ack[src] = None
+    pkgs = acks_raw.get("packages")
+    if isinstance(pkgs, dict):
+        for src, sub in pkgs.items():
+            m = {}
+            if isinstance(sub, dict):                 # v2: {pkg: {ids, since}}
+                for pkg, ent in sub.items():
+                    m[pkg] = (ent or {}).get("ids") if isinstance(ent, dict) else None
+            elif isinstance(sub, list):               # v1: [pkg, …] → cover-all
+                for pkg in sub:
+                    m[pkg] = None
+            package_ack[src] = m
+
+def id_suppressed(src, name, vid):
+    # An advisory id is suppressed iff a project- or package-level ack covers it:
+    # a None ids-set covers everything, otherwise the id must be listed.
+    if src in project_ack:
+        pj = project_ack[src]
+        if pj is None or vid in ((pj.get(name) if isinstance(pj, dict) else None) or []):
+            return True
+    pk = package_ack.get(src, {})
+    if name in pk:
+        pl = pk[name]
+        if pl is None or vid in pl:
+            return True
+    return False
+
+def is_muted(src, name):
+    # True when SOME ack (project or package) applies to this (src, pkg), whether
+    # cover-all or advisory-scoped — used to flag a mute-piercing active fragment.
+    return src in project_ack or name in package_ack.get(src, {})
+
+# --- one-time backfill of open-ended (legacy) mutes ------------------------
+# Grandfather any ack whose ids is null (open-ended) to the advisories seen in
+# THIS scan, so genuinely new advisories pierce the mute on later runs. This run
+# still treats the open-ended mute as cover-all (project_ack/package_ack already
+# captured the None). Writes the ack store atomically, only when it changed.
+def backfill_open_ended(a, cur, path):
+    if not isinstance(a, dict) or not path:
+        return
+    changed = False
+    projs = a.get("projects")
+    if isinstance(projs, dict):
+        for src, ent in projs.items():
+            if isinstance(ent, dict) and ent.get("ids") is None and src in cur:
+                ent["ids"] = cur[src]          # {pkg:[ids]} — matches state_proj
+                changed = True
+    pkgs = a.get("packages")
+    if isinstance(pkgs, dict):
+        for src, sub in pkgs.items():
+            if not isinstance(sub, dict):
+                continue
+            for pkg, ent in sub.items():
+                if isinstance(ent, dict) and ent.get("ids") is None \
+                   and src in cur and pkg in cur[src]:
+                    ent["ids"] = cur[src][pkg]  # [ids] — matches state_pkg
+                    changed = True
+    if changed:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(a, f, indent=2)
+        os.replace(tmp, path)
+
+if not render:   # scan-only: --render never rewrites the ack store
+    backfill_open_ended(acks_raw, cur_findings, os.environ.get("ACKS", ""))
+
+def sev_bucket(score):
+    try: s = float(score)
+    except: return ("low", "LOW")
+    if s >= 9: return ("crit", "CRIT")
+    if s >= 7: return ("high", "HIGH")
+    if s >= 4: return ("med",  "MED")
+    return ("low", "LOW")
+
+# --- partition each vulnerable package into active / acknowledged fragments --
+# A package's advisories split into UNCOVERED (active) and COVERED (acked) ids.
+# Each non-empty side becomes a "fragment" row; a mixed package appears in BOTH
+# sections. Per-fragment severity = max over its ids (id→severity from the
+# osv-scanner groups, falling back to the package max). new_ids apply to the
+# active fragment only; an active fragment of an otherwise-muted package is a
+# "pierced" fragment (rendered with a muted badge + a re-ack button).
+active, acked = [], []
+by_src = []   # [(src, root, [records])] — a src's records are contiguous
+for rec in records:
+    if not by_src or by_src[-1][0] != rec["src"]:
+        by_src.append((rec["src"], rec["root"], []))
+    by_src[-1][2].append(rec)
+for src, root, recs in by_src:
+    act_pkgs, ack_pkgs = [], []
+    for rec in recs:
+        name, ids = rec["pkg"], rec["ids"]
+        def frag_sev(frag_ids, _m=rec["maxsev"], _s=rec["id_sev"]):
+            return max((_s.get(i, _m) for i in frag_ids), default=0.0)
+        fix, eco, version = rec["fix"], rec["eco"], rec["version"]
+        covered   = [i for i in ids if id_suppressed(src, name, i)]
+        uncovered = [i for i in ids if not id_suppressed(src, name, i)]
+        muted = is_muted(src, name)
+        if uncovered:
+            act_pkgs.append({
+                "name": name, "version": version, "eco": eco, "fix": fix,
+                "sev": frag_sev(uncovered), "count": len(uncovered), "ids": uncovered,
+                "new_ids": [i for i in uncovered if i in rec["new_ids"]],
+                "muted": muted,                       # pierced a mute → muted badge + re-ack
+                "reack_project": src in project_ack,  # re-ack form: project vs package
+            })
+        if covered:
+            ack_pkgs.append({
+                "name": name, "version": version, "eco": eco, "fix": fix,
+                "sev": frag_sev(covered), "count": len(covered), "ids": covered,
+                "new_ids": [],
+            })
+    if act_pkgs:
+        act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        active.append({"src": src, "root": root, "pkgs": act_pkgs,
+                       "maxsev": max(p["sev"] for p in act_pkgs)})
+    if ack_pkgs:
+        ack_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        acked.append({"src": src, "root": root, "pkgs": ack_pkgs,
+                      "maxsev": max(p["sev"] for p in ack_pkgs), "whole": src in project_ack})
+active.sort(key=lambda x: x["maxsev"], reverse=True)
+acked.sort(key=lambda x: x["maxsev"], reverse=True)
+
+# A partially-muted package appears once per section (an active fragment AND
+# an acked fragment for the same (src, pkg)) — same for a project whose
+# packages split that way. Both would otherwise render the same DOM id twice;
+# the active row/card wins the plain id, the acked twin gets suffix "-k".
+active_srcs = {pr["src"] for pr in active}
+active_pkg_keys = {(pr["src"], p["name"]) for pr in active for p in pr["pkgs"]}
+
+# --- per-project-root Finder markers (drive folder-mark) -------------------
+# aggregate active + acked findings per root: active wins the status, counts sum.
+root_agg = {}   # root -> {"av": active_vulns, "ac": active_crit_pkgs, "kv": acked_vulns, "has_active": bool}
+def _root_entry(root):
+    return root_agg.setdefault(root, {"av": 0, "ac": 0, "kv": 0, "has_active": False})
+for pr in active:
+    root = pr["root"]
+    if root in scan_targets and not probe:   # skip a root that IS a scan target
+        continue
+    e = _root_entry(root); e["has_active"] = True
+    for p in pr["pkgs"]:
+        e["av"] += p["count"]
+        if p["sev"] >= 9: e["ac"] += 1
+for pr in acked:
+    root = pr["root"]
+    if root in scan_targets and not probe:
+        continue
+    e = _root_entry(root)
+    for p in pr["pkgs"]:
+        e["kv"] += p["count"]
+
+mark_active = sum(1 for e in root_agg.values() if e["has_active"])
+mark_acked  = len(root_agg) - mark_active
+
+# desired tsv for folder-mark sync: root<TAB>status<TAB>summary
+mf = os.environ.get("MARKS", "")
+if mf:
+    lines = []
+    for root, e in root_agg.items():
+        if e["has_active"]:
+            crit = f" ({e['ac']} critical)" if e["ac"] else ""
+            lines.append(f"{root}\tactive\t{e['av']} active vulnerabilities{crit}")
+        else:
+            lines.append(f"{root}\tacked\t{e['kv']} acknowledged")
+    with open(mf, "w") as f:
+        if lines:
+            f.write("\n".join(lines) + "\n")
+
+def tally(projlist):
+    vulns = sum(p["count"] for pr in projlist for p in pr["pkgs"])
+    pkgs  = sum(len(pr["pkgs"]) for pr in projlist)
+    crit  = sum(1 for pr in projlist for p in pr["pkgs"] if p["sev"] >= 9)
+    return len(projlist), pkgs, vulns, crit
+a_proj, a_pkg, a_vuln, a_crit = tally(active)
+k_proj, k_pkg, k_vuln, k_crit = tally(acked)
+
+# --- new / resolved since last scan (computed only when baseline is valid) --
+# NEW = active finding keys (src, pkg, id) absent from the baseline union.
+# RESOLVED = baseline union keys absent from the current union.
+# --render: NEW from the fragments (the saved new_ids, filtered to the now
+# uncovered ids), RESOLVED as the scan counted it.
+if render:
+    new_vulns = sum(len(p["new_ids"]) for pr in active for p in pr["pkgs"])
+    resolved_vulns = saved_resolved
+else:
+    new_vulns = sum(len(p["new_ids"]) for pr in active for p in pr["pkgs"]) if baseline_valid else 0
+    resolved_vulns = 0
+if not render and baseline_valid:
+    cur_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
+    resolved_vulns = sum(1 for s, pk in baseline_findings.items() for n, ids in pk.items()
+                         for i in ids if (s, n, i) not in cur_keys)
+
+# hand the active/acked counts back to the shell (notification + log)
+cf = os.environ.get("COUNTS", "")
+if cf:
+    with open(cf, "w") as f:
+        f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
+        f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
+        f.write(f"NEW_VULNS={new_vulns}\nRESOLVED_VULNS={resolved_vulns}\n")
+        f.write(f"MARK_ACTIVE={mark_active}\nMARK_ACKED={mark_acked}\n")
+        if render:
+            f.write(f"SCAN_STAMP={shlex.quote(stamp)}\n")
+
+# --- last-scan state file (baseline for a future diff task) ----------------
+# findings = union of ALL vulnerable findings (active AND acknowledged),
+# collected straight from the raw scan results so ack state doesn't matter.
+# render = the records above, what --render rebuilds the report from.
+# Written by a scan only (STATE is empty under --probe; --render reads it).
+sf = os.environ.get("STATE", "")
+if sf and not render:
+    state = {
+        "schema": 1,
+        "stamp": stamp,
+        "target": target,
+        "counts": {
+            "active": {"projects": a_proj, "pkgs": a_pkg, "vulns": a_vuln, "crit": a_crit},
+            "acked":  {"projects": k_proj, "pkgs": k_pkg, "vulns": k_vuln, "crit": k_crit},
+            "new_vulns": new_vulns, "resolved_vulns": resolved_vulns,
+        },
+        "findings": cur_findings,
+        "render": {"schema": 1, "scan_targets": scan_targets, "packages": records},
+    }
+    os.makedirs(os.path.dirname(sf) or ".", exist_ok=True)
+    tmp = sf + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, sf)
+
+def short(src):
+    return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
+
+def cp_btn(cmd, label):
+    return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
+            f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
+
+def app_link(action, params, label, title, extra=""):
+    # params: ordered [(name, value)]; values percent-encoded with no safe chars
+    q = "&".join(k + "=" + urllib.parse.quote(v, safe="") for k, v in params)
+    href = "hiveguard://" + action + "?v=1&" + q
+    # target=_blank: a hiveguard:// link followed in the report's own tab makes
+    # Opera/Chromium close that tab after handing the URL to the app; a throwaway
+    # tab is closed instead and the report stays open.
+    return (f'<a class="act-link{extra}" href="{html.escape(href)}" '
+            f'title="{title}" target="_blank" rel="noopener">{html.escape(label)}</a>')
+
+def cp_alt(cmd):
+    # the terminal command, tucked behind a small secondary copy button
+    c = html.escape(cmd)
+    return (f'<button class="cp cp-alt" type="button" data-cmd="{c}" '
+            f'title="Copy the terminal command instead" aria-label="Copy command: {c}">copy</button>')
+
+def pkg_row(p, src, section):
+    cls, lbl = sev_bucket(p["sev"])
+    active_sec = section == "active"
+    pierced = active_sec and p.get("muted")   # active fragment of a muted package
+    # NEW badge + accented links apply to active rows only (matches the tile count)
+    new_ids = set(p.get("new_ids") or []) if active_sec else set()
+    idlinks = " ".join(
+        f'<a class="{"new" if i in new_ids else ""}" '
+        f'href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
+        for i in p["ids"][:4])
+    more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"]) > 4 else ""
+    badge = ('<span class="mutedbadge">muted</span>' if pierced else "") \
+          + (f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else "")
+    fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
+    if section == "acked":
+        cmd, label = "hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute"
+    elif pierced:
+        # re-ack folds the pierced advisory back into the existing mute; use the
+        # project form when the coverage came from a whole-project mute.
+        if p.get("reack_project"):
+            cmd, label = "hiveguard ack " + shlex.quote(src), "re-ack"
+        else:
+            cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack"
+    else:
+        cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute"
+    if links_on and active_sec:
+        if pierced:
+            title = ("Fold the new advisory into this package's mute via the HiveGuard app "
+                     "(asks for confirmation)")
+            if p.get("reack_project"):
+                link = app_link("ack-project", [("src", src)], "re-ack", title)
+            else:
+                link = app_link("ack", [("src", src), ("pkg", p["name"])], "re-ack", title)
+        else:
+            link = app_link("ack", [("src", src), ("pkg", p["name"])], "mark as known",
+                            "Mark this finding as known via the HiveGuard app (asks for confirmation)")
+        btn = f'<span class="actg">{link}{cp_alt(cmd)}</span>'
+    else:
+        btn = cp_btn(cmd, label)
+    # section 2.7 report anchor: f-<h12(src\0pkg)>, same formula as the run
+    # file's "anchor". When this (src, pkg) also has an active-section row
+    # (partial mute), the active row wins the plain id and this acked twin
+    # gets suffix "-k" so the two <tr> elements don't share a DOM id.
+    fid = "f-" + h12(src + "\0" + p["name"])
+    if section == "acked" and (src, p["name"]) in active_pkg_keys:
+        fid += "-k"
+    return (f'<tr id="{fid}"><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
+            f'<td class="mono">{html.escape(p["version"])}</td>'
+            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span>{badge}</td>'
+            f'<td class="mono fix">{fix}</td>'
+            f'<td class="ids">{idlinks}{more}</td>'
+            f'<td class="act">{btn}</td></tr>')
+
+def proj_card(pr, muted):
+    rows = "".join(pkg_row(p, pr["src"], "acked" if muted else "active") for p in pr["pkgs"])
+    pcls, plbl = sev_bucket(pr["maxsev"])
+    if muted:
+        head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
+        whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
+        last = "Unmute"
+    else:
+        if links_on:
+            links = app_link("ack-project", [("src", pr["src"])], "mark project as known",
+                             "Mark every finding of this project as known via the HiveGuard app "
+                             "(asks for confirmation)")
+            root = pr["root"]
+            if strict_on and root in root_agg:
+                for dur, words in (("1h", "1 hour"), ("2h", "2 hours")):
+                    links += app_link("pause", [("root", root), ("for", dur)],
+                                      "pause strict " + dur[:-1] + " h",
+                                      "Pause strict mode for this project for " + words +
+                                      " via the HiveGuard app (asks for confirmation)", " pause")
+            head_btn = f'<span class="actg">{links}{cp_alt("hiveguard ack " + shlex.quote(pr["src"]))}</span>'
+        else:
+            head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
+        whole = ''
+        last = "Mute"
+    sel = ('<input type="checkbox" class="selp" '
+           f'data-ack="{html.escape("hiveguard ack " + shlex.quote(pr["src"]))}" '
+           f'aria-label="Select {short(pr["src"])} to mute">') if not muted else ''
+    # section 2.7 report anchor: p-<h12(src)>. Same "-k" rule as pkg_row above,
+    # for a project that appears in both sections (some packages active, some
+    # fully covered by an ack).
+    pid = "p-" + h12(pr["src"])
+    if muted and pr["src"] in active_srcs:
+        pid += "-k"
+    return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
+            f'<span class="chev">▶</span>{sel}'
+            f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
+            f'<span class="pname">{short(pr["src"])}</span>{whole}'
+            f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
+            f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
+            f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div></details>')
+
+if active:
+    body = "".join(proj_card(pr, False) for pr in active)
+elif acked:
+    body = '<p class="clean">✅ No active vulnerabilities — everything found is acknowledged.</p>'
+else:
+    body = '<p class="clean">✅ No known vulnerabilities found.</p>'
+
+toolbar = ('<div class="toolbar">'
+           '<label class="selall"><input type="checkbox" id="selAll"> all</label>'
+           '<span class="selcount" id="selCount">selected 0</span>'
+           '<button class="btn" id="copySel" type="button" disabled>Copy mute command (0)</button>'
+           '<button class="btn" id="toggleAll" type="button">Expand all</button>'
+           '</div>') if active else ''
+
+acked_html = ""
+if acked:
+    acked_html = (
+        '<details class="ackwrap"><summary>'
+        f'Acknowledged — {k_proj} project(s), {k_pkg} package(s), {k_vuln} vuln(s) muted'
+        '</summary>'
+        '<p class="ackhint">Excluded from the totals above and from the daily alert. '
+        'Copy an “unmute” command to bring one back into the count.</p>'
+        + "".join(proj_card(pr, True) for pr in acked) +
+        '</details>')
+
+# links-only CSS and footer sentence — nothing extra when links are off, so that
+# report stays byte-identical to the pre-links one
+links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
+             "\n.act-link{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--surface);border:1px solid var(--accent);border-radius:6px;padding:3px 8px;text-decoration:none;white-space:nowrap}"
+             "\n.act-link:hover{background:var(--accent);color:#fff}"
+             "\n.act-link.pause{color:var(--high);border-color:var(--high)}"
+             "\n.act-link.pause:hover{background:var(--high);color:#fff}"
+             "\n.cp.cp-alt{font-size:10px;padding:2px 6px;opacity:.7}"
+             "\n.cp.cp-alt:hover{opacity:1}") if links_on else ""
+footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
+               "“copy” gives the terminal command instead." if links_on else
+               "Mute an old project with the “mute” button (→ hiveguard ack).")
+
+vuln_l = "vulnerabilities" + (f' · +{k_vuln} muted' if k_vuln else '')
+lede_extra = (' Muted projects/findings are excluded — see <b>Acknowledged</b> at the bottom.'
+              if acked else '')
+
+page = f'''<meta charset="utf-8">
+<title>OSV — projects</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{{color-scheme:light;--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
+--border:#dae0e4;--border-strong:#c6ced3;--accent:#2367a8;
+--crit:#c02636;--crit-s:#f5dade;--high:#c85a1c;--high-s:#f4e2d2;--med:#a9861f;--med-s:#f1e9d0;--low:#4a7a52;--low-s:#dfeadf;
+--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}}
+@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;
+--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;--border:#242d32;--border-strong:#333e44;--accent:#5199db;
+--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}}}
+:root[data-theme="dark"]{{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;
+--border:#242d32;--border-strong:#333e44;--accent:#5199db;--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;
+--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}}
+.wrap{{max-width:940px;margin:0 auto;padding:0 20px 90px}}
+header{{padding:44px 0 20px;border-bottom:1px solid var(--border)}}
+.eyebrow{{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 10px}}
+h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
+.lede{{color:var(--muted);font-size:15px;margin:0}}
+.stats{{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}}
+.stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 14px;min-width:96px}}
+.stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
+.stat.crit .n{{color:var(--crit)}}
+.stat.new .n{{color:var(--accent)}}
+.newbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--accent);color:#fff;letter-spacing:.02em}}
+.mutedbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--high-s);color:var(--high);letter-spacing:.02em}}
+details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
+details.proj.acked{{opacity:.72}}
+details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
+details.proj>summary::-webkit-details-marker{{display:none}}
+details.proj>summary:hover{{background:var(--surface-2)}}
+.chev{{color:var(--faint);transition:transform .15s;font-size:11px}}
+details.proj[open]>summary .chev{{transform:rotate(90deg)}}
+.pname{{flex:1;font-weight:600;word-break:break-word}}
+.cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
+.whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
+.tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
+.toolbar{{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
+.selall{{font-family:var(--mono);font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:5px;cursor:pointer}}
+.selall input{{accent-color:var(--accent);cursor:pointer}}
+.selcount{{font-family:var(--mono);font-size:12px;color:var(--faint)}}
+.btn{{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}}
+.btn:hover{{border-color:var(--accent)}}
+.btn:disabled{{opacity:.5;cursor:default}}
+.btn:disabled:hover{{border-color:var(--border)}}
+.btn.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
+.btn.ok:hover{{border-color:#1f8a44}}
+.cp{{font-family:var(--mono);font-size:11px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;flex:none;
+background:var(--surface-2);border:1px solid var(--border-strong);color:var(--muted);padding:3px 8px;border-radius:6px;
+white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
+.cp:hover{{border-color:var(--accent);color:var(--accent)}}
+.cp.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
+table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}}
+th,td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}}
+th{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface-2)}}
+th.acth,td.act{{text-align:right;white-space:nowrap}}
+tr:last-child td{{border-bottom:none}}
+.pk{{font-family:var(--mono);font-weight:600}}.eco{{color:var(--faint);font-weight:400;margin-left:7px;font-size:11px}}
+.mono{{font-family:var(--mono);font-variant-numeric:tabular-nums}}
+.fix{{color:var(--low)}}.none{{color:var(--faint)}}
+.sev{{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}}
+.sev.crit{{background:var(--crit-s);color:var(--crit)}}.sev.high{{background:var(--high-s);color:var(--high)}}
+.sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
+.ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.ids a.new{{font-weight:700;text-decoration:underline;text-underline-offset:2px}}.more{{color:var(--faint)}}
+.clean{{color:var(--low);font-size:16px;margin-top:30px}}
+.ackwrap{{margin-top:30px}}
+.ackwrap>summary{{cursor:pointer;list-style:none;font-family:var(--mono);font-size:13px;color:var(--muted);border-top:1px dashed var(--border-strong);padding-top:16px}}
+.ackwrap>summary::-webkit-details-marker{{display:none}}
+.ackwrap>summary:hover{{color:var(--accent)}}
+.ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
+footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
+.hl{{outline:2px solid var(--accent);outline-offset:2px}}{links_css}
+</style>
+<div class="wrap">
+<header>
+<p class="eyebrow">osv-daily · {html.escape(stamp)}</p>
+<h1>Vulnerabilities in projects</h1>
+<p class="lede">Scan of <code>{html.escape(target)}</code> against the OSV database. Sorted by severity. Click an ID for its osv.dev page.{lede_extra}</p>
+<div class="stats">
+<div class="stat"><div class="n">{a_proj}</div><div class="l">projects affected</div></div>
+<div class="stat"><div class="n">{a_pkg}</div><div class="l">packages</div></div>
+<div class="stat"><div class="n">{a_vuln}</div><div class="l">{vuln_l}</div></div>
+<div class="stat crit"><div class="n">{a_crit}</div><div class="l">critical</div></div>
+<div class="stat{' new' if new_vulns > 0 else ''}"><div class="n">{new_vulns}</div><div class="l">new since last scan</div></div>
+</div>
+</header>
+{toolbar}
+{body}
+{acked_html}
+<footer>osv-daily · one scan -> report + notification. {footer_hint} Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
+</div>
+<script>
+(function(){{
+  var b=document.getElementById('toggleAll');
+  if(b){{
+    b.addEventListener('click',function(){{
+      var ds=[].slice.call(document.querySelectorAll('details.proj:not(.acked)'));
+      var open=ds.some(function(d){{return !d.open;}});
+      ds.forEach(function(d){{d.open=open;}});
+      b.textContent=open?'Collapse all':'Expand all';
+    }});
+  }}
+  var selAll=document.getElementById('selAll');
+  var selCount=document.getElementById('selCount');
+  var copySel=document.getElementById('copySel');
+  function sync(){{
+    if(!copySel) return;
+    var n=document.querySelectorAll('input.selp:checked').length;
+    var total=document.querySelectorAll('input.selp').length;
+    if(selCount) selCount.textContent='selected '+n;
+    if(!copySel.classList.contains('ok')) copySel.textContent='Copy mute command ('+n+')';
+    copySel.disabled=(n===0);
+    if(selAll){{
+      selAll.checked=(n===total&&total>0);
+      selAll.indeterminate=(n>0&&n<total);
+    }}
+  }}
+  function copy(cmd,btn){{
+    function done(){{
+      var orig=btn.innerHTML;
+      btn.classList.add('ok'); btn.textContent='✓ copied';
+      setTimeout(function(){{
+        btn.classList.remove('ok');
+        if(btn===copySel) sync(); else btn.innerHTML=orig;
+      }},1500);
+    }}
+    function fb(){{
+      var t=document.createElement('textarea'); t.value=cmd;
+      t.style.position='fixed'; t.style.top='0'; t.style.opacity='0';
+      document.body.appendChild(t); t.focus(); t.select();
+      try{{document.execCommand('copy');}}catch(err){{}}
+      document.body.removeChild(t); done();
+    }}
+    if(navigator.clipboard&&navigator.clipboard.writeText){{ navigator.clipboard.writeText(cmd).then(done,fb); }}
+    else {{ fb(); }}
+  }}
+  document.addEventListener('click',function(e){{
+    if(e.target.closest('input.selp')){{ e.stopPropagation(); return; }}  // check the box, don't toggle the <details>
+    var btn=e.target.closest('.cp');
+    if(!btn) return;
+    e.preventDefault(); e.stopPropagation();   // don't toggle the <details>
+    copy(btn.getAttribute('data-cmd'),btn);
+  }});
+  document.addEventListener('change',function(e){{
+    if(e.target.closest('input.selp')) sync();
+  }});
+  if(selAll){{
+    selAll.addEventListener('change',function(){{
+      [].slice.call(document.querySelectorAll('input.selp')).forEach(function(c){{c.checked=selAll.checked;}});
+      sync();
+    }});
+  }}
+  if(copySel){{
+    copySel.addEventListener('click',function(){{
+      var cmds=[].slice.call(document.querySelectorAll('input.selp:checked')).map(function(c){{
+        return c.getAttribute('data-ack');
+      }});
+      if(!cmds.length) return;
+      copy(cmds.join(' && \\\\\\n'),copySel);
+    }});
+  }}
+  function openAnchor(){{
+    if(!location.hash) return;
+    var el=document.getElementById(location.hash.slice(1));
+    if(!el) return;
+    var p=el;
+    while(p){{
+      if(p.tagName==='DETAILS') p.open=true;
+      p=p.parentElement;
+    }}
+    el.scrollIntoView({{block:'center'}});
+    el.classList.add('hl');
+    setTimeout(function(){{el.classList.remove('hl');}},3000);
+  }}
+  window.addEventListener('load',openAnchor);
+  window.addEventListener('hashchange',openAnchor);
+  sync();
+}})();
+</script>'''
+# atomic: a browser reload during the write never sees a half page. --render
+# keeps the report's modification time — the scan's (or, when the report is
+# missing, the state file's, written at scan end) — so --if-due and the
+# open-or-rescan gate never take an ack for a fresh scan.
+out = os.environ["OUT"]
+if render:
+    keep = os.stat(out) if os.path.exists(out) else os.stat(os.environ["STATE"])
+tmp = out + ".tmp"
+with open(tmp, "w") as f:
+    f.write(page)
+os.replace(tmp, out)
+if render:
+    os.utime(out, (keep.st_atime, keep.st_mtime))
+
+# --- run outcome file (scan only: STATE is empty under --probe; never on --render)
+# `new` = this run's new advisory ids per active package fragment; `unseen` =
+# `new` plus the previous run's unseen ids still present in this scan, carried
+# over only while the report has not been opened since that previous run. Acks
+# are NOT applied here — `hiveguard status` applies them live.
+if sf and not render:
+    run_path = os.environ.get("RUN", "")
+    all_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
+    this_run_new = []
+    for pr in active:
+        for p in pr["pkgs"]:
+            if not p["new_ids"]:
+                continue
+            this_run_new.append({
+                "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
+                "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
+                "ids": list(p["new_ids"]),
+                "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
+                "project_anchor": "p-" + h12(pr["src"]),
+            })
+    prev_run = None
+    try:
+        with open(run_path) as f:
+            prev_run = json.load(f)
+    except Exception:
+        prev_run = None
+    if not isinstance(prev_run, dict):
+        prev_run = None
+    try:
+        with open(os.environ.get("OPENED", "")) as f:
+            opened = int(f.read().strip())
+    except Exception:
+        opened = 0
+    try:
+        prev_finished = int(prev_run.get("finished_epoch", 0) or 0) if prev_run else 0
+    except Exception:
+        prev_finished = 0
+    carry = (prev_run.get("unseen") or []) if prev_run and opened < prev_finished else []
+    merged = {}
+    for e in carry:
+        if not isinstance(e, dict):
+            continue
+        ids = [i for i in (e.get("ids") or []) if (e.get("src"), e.get("pkg"), i) in all_keys]
+        if ids:
+            merged[(e.get("src"), e.get("pkg"))] = {**e, "ids": ids}
+    for n in this_run_new:                    # this run's metadata wins, ids unioned
+        k = (n["src"], n["pkg"]); m = merged.get(k)
+        merged[k] = n if m is None else {**n, "ids": sorted(set(m["ids"]) | set(n["ids"]))}
+    def order(e):
+        try: sv = float(e.get("sev") or 0)
+        except Exception: sv = 0.0
+        return (-sv, e.get("src") or "", e.get("pkg") or "")
+    unseen = sorted(merged.values(), key=order)
+    this_run_new.sort(key=order)
+    # every active package fragment (the report's Active rows) — what the app
+    # validates report links against; ids = the uncovered ids at scan time
+    active_entries = sorted(({
+        "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
+        "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
+        "ids": list(p["ids"]),
+        "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
+        "project_anchor": "p-" + h12(pr["src"]),
+    } for pr in active for p in pr["pkgs"]), key=order)
+    roots = {r: {"status": "active" if e["has_active"] else "acked",
+                 "active_vulns": e["av"], "crit_pkgs": e["ac"], "acked_vulns": e["kv"]}
+             for r, e in root_agg.items()}
+    run_doc = {
+        "schema": 1, "ok": True, "rc": int(os.environ.get("SCAN_RC", "0") or 0), "error": None,
+        "started_epoch": int(os.environ.get("STARTED", "0") or 0),
+        "finished_epoch": int(time.time()),
+        "stamp": ig("STAMP"), "target": ig("TARGET"),
+        "counts": state["counts"], "roots": roots,
+        "new": this_run_new, "unseen": unseen, "active": active_entries,
+    }
+    if run_path:
+        os.makedirs(os.path.dirname(run_path) or ".", exist_ok=True)
+        tmp = run_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(run_doc, f, indent=2)
+        os.replace(tmp, run_path)
+PYEOF
+}
+
 if [ "$open_flag" = 1 ]; then
   if [ -f "$REPORT" ]; then
     print_last_summary   # "I missed the notification" recovery, before opening
@@ -245,6 +1209,8 @@ if [ "$open_flag" = 1 ]; then
   fi
   echo "No report yet at $REPORT — run osv-daily to create one." >&2
   exit 1
+elif [ "$render_flag" = 1 ]; then
+  render_report; exit $?   # never scans, checks osv-scanner or pulls bumblebee
 elif [ "$rescan_flag" = 1 ]; then
   :   # always scan, never prompt
 elif [ "$probe_flag" = 1 ]; then
@@ -449,801 +1415,7 @@ fi
 # APP_RUNNING / STRICT_ON gate the report's action links (see the header).
 STRICT_ON=0; [ "$(config_get strict 0)" = 1 ] && STRICT_ON=1
 APP_RUNNING=0; app_running && APP_RUNNING=1
-APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" python3 <<'PYEOF'
-import json, os, html, re, shlex, hashlib, time, urllib.parse
-d = json.load(open(os.environ["JSON"]))
-def ig(k, dv=""):
-    return os.environ.get(k, dv)
-
-# h12 = first 12 hex chars of SHA-1 — the report's DOM anchors (p-/f-, section
-# 2.7) and osv-run.json's "anchor"/"project_anchor" (below) are the SAME ids,
-# computed with this one function, so `hiveguard daily --open --at <id>` from
-# a run-file id always lands on the matching report element.
-def h12(s):
-    return hashlib.sha1(s.encode()).hexdigest()[:12]
-
-# --- dedup scan results by source path -------------------------------------
-# osv-scanner can emit the SAME source.path more than once (multiple extractors
-# over one manifest, e.g. a requirements.txt). Left as-is that double-counts
-# projects/packages/vulns everywhere. Merge results by path up front so every
-# tally, finding, and report row below is computed from one entry per path.
-#   - group results by source.path (keep the first result's other source fields)
-#   - within a group, merge packages by package name: union each package's
-#     vulnerabilities deduped by vuln id (keep the first package dict's other
-#     fields); concatenate groups so the later max_severity is the group maximum.
-def merge_results(results):
-    by_path, order = {}, []
-    for r in results:
-        path = (r.get("source", {}) or {}).get("path", "")
-        grp = by_path.get(path)
-        if grp is None:
-            grp = by_path[path] = {"source": dict(r.get("source", {}) or {}),
-                                   "packages": {}, "order": []}
-            order.append(path)
-        for p in r.get("packages", []) or []:
-            name = (p.get("package", {}) or {}).get("name", "")
-            mp = grp["packages"].get(name)
-            if mp is None:
-                mp = dict(p)   # keep this first package dict's other fields
-                mp["vulnerabilities"] = list(p.get("vulnerabilities") or [])
-                mp["groups"] = list(p.get("groups") or [])
-                grp["packages"][name] = mp
-                grp["order"].append(name)
-            else:
-                seen = {v.get("id") for v in mp["vulnerabilities"]}
-                for v in (p.get("vulnerabilities") or []):
-                    if v.get("id") not in seen:
-                        mp["vulnerabilities"].append(v); seen.add(v.get("id"))
-                mp["groups"].extend(p.get("groups") or [])   # max_severity = max
-    return [{"source": by_path[path]["source"],
-             "packages": [by_path[path]["packages"][n] for n in by_path[path]["order"]]}
-            for path in order]
-
-d["results"] = merge_results(d.get("results", []))
-
-# --- baseline for the "new since last scan" diff ---------------------------
-# Read the EXISTING state file BEFORE this run overwrites it at the end. The
-# diff is valid ONLY when a prior scan exists AND it covered the same target
-# set — otherwise an absent/mismatched baseline would mark everything "new".
-prev = None
-try:
-    with open(os.environ.get("STATE", "")) as f:
-        prev = json.load(f)
-except Exception:
-    prev = None
-baseline_findings = (prev or {}).get("findings", {}) or {}
-baseline_target = (prev or {}).get("target")
-baseline_valid = prev is not None and baseline_target is not None and baseline_target == ig("TARGET")
-
-# current union of ALL vulnerable findings (active AND acked), straight from the
-# raw scan results — used both for the state file and the resolved-since diff.
-cur_findings = {}
-for r in d.get("results", []):
-    src = r.get("source", {}).get("path", "")
-    for p in r.get("packages", []):
-        vulns = p.get("vulnerabilities") or []
-        if not vulns: continue
-        name = p.get("package", {}).get("name", "")
-        cur_findings.setdefault(src, {})[name] = [v.get("id", "") for v in vulns]
-
-# --- acknowledgements (schema v2, advisory-scoped) -------------------------
-# Read the ack store, tolerant of a v1-shaped store (arrays), which we treat as
-# open-ended (cover-all). Build:
-#   project_ack[src]      = ids-map {pkg:[ids]} | None   (None = cover-all)
-#   package_ack[src][pkg] = ids-list [ids]      | None   (None = cover-all)
-acks_raw = None
-try:
-    with open(os.environ.get("ACKS", "")) as f:
-        acks_raw = json.load(f)
-except Exception:
-    acks_raw = None
-
-project_ack, package_ack = {}, {}
-if isinstance(acks_raw, dict):
-    projs = acks_raw.get("projects")
-    if isinstance(projs, dict):                       # v2: {src: {ids, since}}
-        for src, ent in projs.items():
-            project_ack[src] = (ent or {}).get("ids") if isinstance(ent, dict) else None
-    elif isinstance(projs, list):                     # v1: [src, …] → cover-all
-        for src in projs:
-            project_ack[src] = None
-    pkgs = acks_raw.get("packages")
-    if isinstance(pkgs, dict):
-        for src, sub in pkgs.items():
-            m = {}
-            if isinstance(sub, dict):                 # v2: {pkg: {ids, since}}
-                for pkg, ent in sub.items():
-                    m[pkg] = (ent or {}).get("ids") if isinstance(ent, dict) else None
-            elif isinstance(sub, list):               # v1: [pkg, …] → cover-all
-                for pkg in sub:
-                    m[pkg] = None
-            package_ack[src] = m
-
-def id_suppressed(src, name, vid):
-    # An advisory id is suppressed iff a project- or package-level ack covers it:
-    # a None ids-set covers everything, otherwise the id must be listed.
-    if src in project_ack:
-        pj = project_ack[src]
-        if pj is None or vid in ((pj.get(name) if isinstance(pj, dict) else None) or []):
-            return True
-    pk = package_ack.get(src, {})
-    if name in pk:
-        pl = pk[name]
-        if pl is None or vid in pl:
-            return True
-    return False
-
-def is_muted(src, name):
-    # True when SOME ack (project or package) applies to this (src, pkg), whether
-    # cover-all or advisory-scoped — used to flag a mute-piercing active fragment.
-    return src in project_ack or name in package_ack.get(src, {})
-
-# --- one-time backfill of open-ended (legacy) mutes ------------------------
-# Grandfather any ack whose ids is null (open-ended) to the advisories seen in
-# THIS scan, so genuinely new advisories pierce the mute on later runs. This run
-# still treats the open-ended mute as cover-all (project_ack/package_ack already
-# captured the None). Writes the ack store atomically, only when it changed.
-def backfill_open_ended(a, cur, path):
-    if not isinstance(a, dict) or not path:
-        return
-    changed = False
-    projs = a.get("projects")
-    if isinstance(projs, dict):
-        for src, ent in projs.items():
-            if isinstance(ent, dict) and ent.get("ids") is None and src in cur:
-                ent["ids"] = cur[src]          # {pkg:[ids]} — matches state_proj
-                changed = True
-    pkgs = a.get("packages")
-    if isinstance(pkgs, dict):
-        for src, sub in pkgs.items():
-            if not isinstance(sub, dict):
-                continue
-            for pkg, ent in sub.items():
-                if isinstance(ent, dict) and ent.get("ids") is None \
-                   and src in cur and pkg in cur[src]:
-                    ent["ids"] = cur[src][pkg]  # [ids] — matches state_pkg
-                    changed = True
-    if changed:
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(a, f, indent=2)
-        os.replace(tmp, path)
-
-backfill_open_ended(acks_raw, cur_findings, os.environ.get("ACKS", ""))
-
-def vtuple(v):
-    return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
-
-def sev_bucket(score):
-    try: s = float(score)
-    except: return ("low", "LOW")
-    if s >= 9: return ("crit", "CRIT")
-    if s >= 7: return ("high", "HIGH")
-    if s >= 4: return ("med",  "MED")
-    return ("low", "LOW")
-
-# --- partition each vulnerable package into active / acknowledged fragments --
-# A package's advisories split into UNCOVERED (active) and COVERED (acked) ids.
-# Each non-empty side becomes a "fragment" row; a mixed package appears in BOTH
-# sections. Per-fragment severity = max over its ids (id→severity from the
-# osv-scanner groups, falling back to the package max). new_ids apply to the
-# active fragment only; an active fragment of an otherwise-muted package is a
-# "pierced" fragment (rendered with a muted badge + a re-ack button).
-active, acked = [], []
-for r in d.get("results", []):
-    src = r.get("source", {}).get("path", "")
-    act_pkgs, ack_pkgs = [], []
-    for p in r.get("packages", []):
-        vulns = p.get("vulnerabilities") or []
-        if not vulns: continue
-        info = p.get("package", {})
-        name = info.get("name", "")
-        ids = [v.get("id", "") for v in vulns]
-        maxsev = max((float(g.get("max_severity", "0") or 0) for g in (p.get("groups") or [])), default=0.0)
-        # id → severity from the groups (max when an id spans several groups)
-        id2sev = {}
-        for g in (p.get("groups") or []):
-            try: gs = float(g.get("max_severity", "0") or 0)
-            except Exception: gs = 0.0
-            for gid in (g.get("ids") or []):
-                if gid not in id2sev or gs > id2sev[gid]:
-                    id2sev[gid] = gs
-        def frag_sev(frag_ids, _m=maxsev, _s=id2sev):
-            return max((_s.get(i, _m) for i in frag_ids), default=0.0)
-        fixes = []
-        for v in vulns:
-            for af in v.get("affected", []) or []:
-                for rng in af.get("ranges", []) or []:
-                    for e in rng.get("events", []) or []:
-                        if e.get("fixed"): fixes.append(e["fixed"])
-        fix = max(fixes, key=vtuple) if fixes else ""
-        eco, version = info.get("ecosystem", ""), info.get("version", "")
-        covered   = [i for i in ids if id_suppressed(src, name, i)]
-        uncovered = [i for i in ids if not id_suppressed(src, name, i)]
-        muted = is_muted(src, name)
-        # advisory ids not present for this (src, pkg) in the previous scan
-        base_ids = baseline_findings.get(src, {}).get(name, []) if baseline_valid else []
-        if uncovered:
-            act_pkgs.append({
-                "name": name, "version": version, "eco": eco, "fix": fix,
-                "sev": frag_sev(uncovered), "count": len(uncovered), "ids": uncovered,
-                "new_ids": [i for i in uncovered if i not in base_ids] if baseline_valid else [],
-                "muted": muted,                       # pierced a mute → muted badge + re-ack
-                "reack_project": src in project_ack,  # re-ack form: project vs package
-            })
-        if covered:
-            ack_pkgs.append({
-                "name": name, "version": version, "eco": eco, "fix": fix,
-                "sev": frag_sev(covered), "count": len(covered), "ids": covered,
-                "new_ids": [],
-            })
-    if act_pkgs:
-        act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
-        active.append({"src": src, "pkgs": act_pkgs, "maxsev": max(p["sev"] for p in act_pkgs)})
-    if ack_pkgs:
-        ack_pkgs.sort(key=lambda x: x["sev"], reverse=True)
-        acked.append({"src": src, "pkgs": ack_pkgs, "maxsev": max(p["sev"] for p in ack_pkgs),
-                      "whole": src in project_ack})
-active.sort(key=lambda x: x["maxsev"], reverse=True)
-acked.sort(key=lambda x: x["maxsev"], reverse=True)
-
-# A partially-muted package appears once per section (an active fragment AND
-# an acked fragment for the same (src, pkg)) — same for a project whose
-# packages split that way. Both would otherwise render the same DOM id twice;
-# the active row/card wins the plain id, the acked twin gets suffix "-k".
-active_srcs = {pr["src"] for pr in active}
-active_pkg_keys = {(pr["src"], p["name"]) for pr in active for p in pr["pkgs"]}
-
-# --- per-project-root Finder markers (drive folder-mark) -------------------
-# A finding's source path is a manifest (a file). Its project ROOT is the
-# nearest ancestor of the manifest's directory that contains a .git (dir OR
-# file — worktrees), never walking above the scan target the finding is under;
-# with no .git found, the root is the manifest's own directory. Roots are
-# realpath'd (the terminal hook matches a realpath'd $PWD). Findings under one
-# .git (a monorepo) collapse to ONE root. A root that IS itself a scan target is
-# skipped (a stray manifest in a container dir must not tag the whole container).
-scan_targets = [os.path.realpath(t) for t in os.environ.get("SCAN_TARGETS", "").split("\n") if t]
-# Under --probe the single scan target IS the project root (strict mode probes a
-# resolved root), so the "a root that is a scan target must not be marked" rule
-# — meant to stop a stray manifest tagging a whole container dir — is disabled.
-probe = os.environ.get("PROBE", "0") == "1"
-# Report action links (hiveguard://, docs/report-links.md): only while the menu
-# bar app is running at report time, never in a probe report. Pause links also
-# need strict mode on (and a root strict would block — a key of root_agg).
-links_on = os.environ.get("APP_RUNNING", "0") == "1" and not probe
-strict_on = os.environ.get("STRICT_ON", "0") == "1"
-
-def finding_root(src):
-    d0 = os.path.realpath(os.path.dirname(src))
-    # the scan target containing this finding (longest matching prefix bounds the walk)
-    bound = None
-    for t in scan_targets:
-        if d0 == t or d0.startswith(t + os.sep):
-            if bound is None or len(t) > len(bound):
-                bound = t
-    if bound is None:
-        bound = d0
-    cur = d0
-    while True:
-        if os.path.exists(os.path.join(cur, ".git")):
-            return cur
-        if cur == bound:
-            break
-        parent = os.path.dirname(cur)
-        if parent == cur:            # filesystem root — stop
-            break
-        cur = parent
-    return d0
-
-# aggregate active + acked findings per root: active wins the status, counts sum.
-root_agg = {}   # root -> {"av": active_vulns, "ac": active_crit_pkgs, "kv": acked_vulns, "has_active": bool}
-def _root_entry(root):
-    return root_agg.setdefault(root, {"av": 0, "ac": 0, "kv": 0, "has_active": False})
-for pr in active:
-    root = finding_root(pr["src"])
-    if root in scan_targets and not probe:   # skip a root that IS a scan target
-        continue
-    e = _root_entry(root); e["has_active"] = True
-    for p in pr["pkgs"]:
-        e["av"] += p["count"]
-        if p["sev"] >= 9: e["ac"] += 1
-for pr in acked:
-    root = finding_root(pr["src"])
-    if root in scan_targets and not probe:
-        continue
-    e = _root_entry(root)
-    for p in pr["pkgs"]:
-        e["kv"] += p["count"]
-
-mark_active = sum(1 for e in root_agg.values() if e["has_active"])
-mark_acked  = len(root_agg) - mark_active
-
-# desired tsv for folder-mark sync: root<TAB>status<TAB>summary
-mf = os.environ.get("MARKS", "")
-if mf:
-    lines = []
-    for root, e in root_agg.items():
-        if e["has_active"]:
-            crit = f" ({e['ac']} critical)" if e["ac"] else ""
-            lines.append(f"{root}\tactive\t{e['av']} active vulnerabilities{crit}")
-        else:
-            lines.append(f"{root}\tacked\t{e['kv']} acknowledged")
-    with open(mf, "w") as f:
-        if lines:
-            f.write("\n".join(lines) + "\n")
-
-def tally(projlist):
-    vulns = sum(p["count"] for pr in projlist for p in pr["pkgs"])
-    pkgs  = sum(len(pr["pkgs"]) for pr in projlist)
-    crit  = sum(1 for pr in projlist for p in pr["pkgs"] if p["sev"] >= 9)
-    return len(projlist), pkgs, vulns, crit
-a_proj, a_pkg, a_vuln, a_crit = tally(active)
-k_proj, k_pkg, k_vuln, k_crit = tally(acked)
-
-# --- new / resolved since last scan (computed only when baseline is valid) --
-# NEW = active finding keys (src, pkg, id) absent from the baseline union.
-# RESOLVED = baseline union keys absent from the current union.
-new_vulns = sum(len(p["new_ids"]) for pr in active for p in pr["pkgs"]) if baseline_valid else 0
-resolved_vulns = 0
-if baseline_valid:
-    cur_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
-    resolved_vulns = sum(1 for s, pk in baseline_findings.items() for n, ids in pk.items()
-                         for i in ids if (s, n, i) not in cur_keys)
-
-# hand the active/acked counts back to the shell (notification + log)
-cf = os.environ.get("COUNTS", "")
-if cf:
-    with open(cf, "w") as f:
-        f.write(f"ACTIVE_PROJECTS={a_proj}\nACTIVE_PKGS={a_pkg}\nACTIVE_VULNS={a_vuln}\nACTIVE_CRIT={a_crit}\n")
-        f.write(f"ACKED_PROJECTS={k_proj}\nACKED_PKGS={k_pkg}\nACKED_VULNS={k_vuln}\nACKED_CRIT={k_crit}\n")
-        f.write(f"NEW_VULNS={new_vulns}\nRESOLVED_VULNS={resolved_vulns}\n")
-        f.write(f"MARK_ACTIVE={mark_active}\nMARK_ACKED={mark_acked}\n")
-
-# --- last-scan state file (baseline for a future diff task) ----------------
-# findings = union of ALL vulnerable findings (active AND acknowledged),
-# collected straight from the raw scan results so ack state doesn't matter.
-sf = os.environ.get("STATE", "")
-if sf:
-    state = {
-        "schema": 1,
-        "stamp": ig("STAMP"),
-        "target": ig("TARGET"),
-        "counts": {
-            "active": {"projects": a_proj, "pkgs": a_pkg, "vulns": a_vuln, "crit": a_crit},
-            "acked":  {"projects": k_proj, "pkgs": k_pkg, "vulns": k_vuln, "crit": k_crit},
-            "new_vulns": new_vulns, "resolved_vulns": resolved_vulns,
-        },
-        "findings": cur_findings,
-    }
-    os.makedirs(os.path.dirname(sf) or ".", exist_ok=True)
-    tmp = sf + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f, indent=2)
-    os.replace(tmp, sf)
-
-def short(src):
-    return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
-
-def cp_btn(cmd, label):
-    return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
-            f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
-
-def app_link(action, params, label, title, extra=""):
-    # params: ordered [(name, value)]; values percent-encoded with no safe chars
-    q = "&".join(k + "=" + urllib.parse.quote(v, safe="") for k, v in params)
-    href = "hiveguard://" + action + "?v=1&" + q
-    # target=_blank: a hiveguard:// link followed in the report's own tab makes
-    # Opera/Chromium close that tab after handing the URL to the app; a throwaway
-    # tab is closed instead and the report stays open.
-    return (f'<a class="act-link{extra}" href="{html.escape(href)}" '
-            f'title="{title}" target="_blank" rel="noopener">{html.escape(label)}</a>')
-
-def cp_alt(cmd):
-    # the terminal command, tucked behind a small secondary copy button
-    c = html.escape(cmd)
-    return (f'<button class="cp cp-alt" type="button" data-cmd="{c}" '
-            f'title="Copy the terminal command instead" aria-label="Copy command: {c}">copy</button>')
-
-def pkg_row(p, src, section):
-    cls, lbl = sev_bucket(p["sev"])
-    active_sec = section == "active"
-    pierced = active_sec and p.get("muted")   # active fragment of a muted package
-    # NEW badge + accented links apply to active rows only (matches the tile count)
-    new_ids = set(p.get("new_ids") or []) if active_sec else set()
-    idlinks = " ".join(
-        f'<a class="{"new" if i in new_ids else ""}" '
-        f'href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>'
-        for i in p["ids"][:4])
-    more = f' <span class="more">+{len(p["ids"])-4}</span>' if len(p["ids"]) > 4 else ""
-    badge = ('<span class="mutedbadge">muted</span>' if pierced else "") \
-          + (f'<span class="newbadge">NEW +{len(new_ids)}</span>' if new_ids else "")
-    fix = html.escape(p["fix"]) if p["fix"] else '<span class="none">—</span>'
-    if section == "acked":
-        cmd, label = "hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute"
-    elif pierced:
-        # re-ack folds the pierced advisory back into the existing mute; use the
-        # project form when the coverage came from a whole-project mute.
-        if p.get("reack_project"):
-            cmd, label = "hiveguard ack " + shlex.quote(src), "re-ack"
-        else:
-            cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack"
-    else:
-        cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute"
-    if links_on and active_sec:
-        if pierced:
-            title = ("Fold the new advisory into this package's mute via the HiveGuard app "
-                     "(asks for confirmation)")
-            if p.get("reack_project"):
-                link = app_link("ack-project", [("src", src)], "re-ack", title)
-            else:
-                link = app_link("ack", [("src", src), ("pkg", p["name"])], "re-ack", title)
-        else:
-            link = app_link("ack", [("src", src), ("pkg", p["name"])], "mark as known",
-                            "Mark this finding as known via the HiveGuard app (asks for confirmation)")
-        btn = f'<span class="actg">{link}{cp_alt(cmd)}</span>'
-    else:
-        btn = cp_btn(cmd, label)
-    # section 2.7 report anchor: f-<h12(src\0pkg)>, same formula as the run
-    # file's "anchor". When this (src, pkg) also has an active-section row
-    # (partial mute), the active row wins the plain id and this acked twin
-    # gets suffix "-k" so the two <tr> elements don't share a DOM id.
-    fid = "f-" + h12(src + "\0" + p["name"])
-    if section == "acked" and (src, p["name"]) in active_pkg_keys:
-        fid += "-k"
-    return (f'<tr id="{fid}"><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
-            f'<td class="mono">{html.escape(p["version"])}</td>'
-            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span>{badge}</td>'
-            f'<td class="mono fix">{fix}</td>'
-            f'<td class="ids">{idlinks}{more}</td>'
-            f'<td class="act">{btn}</td></tr>')
-
-def proj_card(pr, muted):
-    rows = "".join(pkg_row(p, pr["src"], "acked" if muted else "active") for p in pr["pkgs"])
-    pcls, plbl = sev_bucket(pr["maxsev"])
-    if muted:
-        head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
-        whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
-        last = "Unmute"
-    else:
-        if links_on:
-            links = app_link("ack-project", [("src", pr["src"])], "mark project as known",
-                             "Mark every finding of this project as known via the HiveGuard app "
-                             "(asks for confirmation)")
-            root = finding_root(pr["src"])
-            if strict_on and root in root_agg:
-                for dur, words in (("1h", "1 hour"), ("2h", "2 hours")):
-                    links += app_link("pause", [("root", root), ("for", dur)],
-                                      "pause strict " + dur[:-1] + " h",
-                                      "Pause strict mode for this project for " + words +
-                                      " via the HiveGuard app (asks for confirmation)", " pause")
-            head_btn = f'<span class="actg">{links}{cp_alt("hiveguard ack " + shlex.quote(pr["src"]))}</span>'
-        else:
-            head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
-        whole = ''
-        last = "Mute"
-    sel = ('<input type="checkbox" class="selp" '
-           f'data-ack="{html.escape("hiveguard ack " + shlex.quote(pr["src"]))}" '
-           f'aria-label="Select {short(pr["src"])} to mute">') if not muted else ''
-    # section 2.7 report anchor: p-<h12(src)>. Same "-k" rule as pkg_row above,
-    # for a project that appears in both sections (some packages active, some
-    # fully covered by an ack).
-    pid = "p-" + h12(pr["src"])
-    if muted and pr["src"] in active_srcs:
-        pid += "-k"
-    return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
-            f'<span class="chev">▶</span>{sel}'
-            f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
-            f'<span class="pname">{short(pr["src"])}</span>{whole}'
-            f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
-            f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
-            f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
-            f'<tbody>{rows}</tbody></table></div></details>')
-
-if active:
-    body = "".join(proj_card(pr, False) for pr in active)
-elif acked:
-    body = '<p class="clean">✅ No active vulnerabilities — everything found is acknowledged.</p>'
-else:
-    body = '<p class="clean">✅ No known vulnerabilities found.</p>'
-
-toolbar = ('<div class="toolbar">'
-           '<label class="selall"><input type="checkbox" id="selAll"> all</label>'
-           '<span class="selcount" id="selCount">selected 0</span>'
-           '<button class="btn" id="copySel" type="button" disabled>Copy mute command (0)</button>'
-           '<button class="btn" id="toggleAll" type="button">Expand all</button>'
-           '</div>') if active else ''
-
-acked_html = ""
-if acked:
-    acked_html = (
-        '<details class="ackwrap"><summary>'
-        f'Acknowledged — {k_proj} project(s), {k_pkg} package(s), {k_vuln} vuln(s) muted'
-        '</summary>'
-        '<p class="ackhint">Excluded from the totals above and from the daily alert. '
-        'Copy an “unmute” command to bring one back into the count.</p>'
-        + "".join(proj_card(pr, True) for pr in acked) +
-        '</details>')
-
-# links-only CSS and footer sentence — nothing extra when links are off, so that
-# report stays byte-identical to the pre-links one
-links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
-             "\n.act-link{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--surface);border:1px solid var(--accent);border-radius:6px;padding:3px 8px;text-decoration:none;white-space:nowrap}"
-             "\n.act-link:hover{background:var(--accent);color:#fff}"
-             "\n.act-link.pause{color:var(--high);border-color:var(--high)}"
-             "\n.act-link.pause:hover{background:var(--high);color:#fff}"
-             "\n.cp.cp-alt{font-size:10px;padding:2px 6px;opacity:.7}"
-             "\n.cp.cp-alt:hover{opacity:1}") if links_on else ""
-footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
-               "“copy” gives the terminal command instead." if links_on else
-               "Mute an old project with the “mute” button (→ hiveguard ack).")
-
-vuln_l = "vulnerabilities" + (f' · +{k_vuln} muted' if k_vuln else '')
-lede_extra = (' Muted projects/findings are excluded — see <b>Acknowledged</b> at the bottom.'
-              if acked else '')
-
-page = f'''<meta charset="utf-8">
-<title>OSV — projects</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-:root{{color-scheme:light;--bg:#eef1f3;--surface:#f9fbfc;--surface-2:#e5eaed;--text:#161b1f;--muted:#5b666d;--faint:#8a959c;
---border:#dae0e4;--border-strong:#c6ced3;--accent:#2367a8;
---crit:#c02636;--crit-s:#f5dade;--high:#c85a1c;--high-s:#f4e2d2;--med:#a9861f;--med-s:#f1e9d0;--low:#4a7a52;--low-s:#dfeadf;
---mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}}
-@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;
---text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;--border:#242d32;--border-strong:#333e44;--accent:#5199db;
---crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;--med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}}}
-:root[data-theme="dark"]{{color-scheme:dark;--bg:#0e1316;--surface:#161d21;--surface-2:#1f272c;--text:#e4eaed;--muted:#9aa5ac;--faint:#6d777d;
---border:#242d32;--border-strong:#333e44;--accent:#5199db;--crit:#e5606c;--crit-s:#3a1519;--high:#e08a4d;--high-s:#33200f;
---med:#d6b256;--med-s:#312810;--low:#6db874;--low-s:#15301a;}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}}
-.wrap{{max-width:940px;margin:0 auto;padding:0 20px 90px}}
-header{{padding:44px 0 20px;border-bottom:1px solid var(--border)}}
-.eyebrow{{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 10px}}
-h1{{font-size:clamp(26px,5vw,38px);margin:0 0 8px;letter-spacing:-.02em}}
-.lede{{color:var(--muted);font-size:15px;margin:0}}
-.stats{{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}}
-.stat{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 14px;min-width:96px}}
-.stat .n{{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}}.stat .l{{font-size:11px;color:var(--muted)}}
-.stat.crit .n{{color:var(--crit)}}
-.stat.new .n{{color:var(--accent)}}
-.newbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--accent);color:#fff;letter-spacing:.02em}}
-.mutedbadge{{font-family:var(--mono);font-size:10px;font-weight:600;margin-left:7px;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--high-s);color:var(--high);letter-spacing:.02em}}
-details.proj{{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}}
-details.proj.acked{{opacity:.72}}
-details.proj>summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:11px 14px;font-family:var(--mono);font-size:14px}}
-details.proj>summary::-webkit-details-marker{{display:none}}
-details.proj>summary:hover{{background:var(--surface-2)}}
-.chev{{color:var(--faint);transition:transform .15s;font-size:11px}}
-details.proj[open]>summary .chev{{transform:rotate(90deg)}}
-.pname{{flex:1;font-weight:600;word-break:break-word}}
-.cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
-.whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
-.tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
-.toolbar{{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:20px;margin-bottom:-4px}}
-.selall{{font-family:var(--mono);font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:5px;cursor:pointer}}
-.selall input{{accent-color:var(--accent);cursor:pointer}}
-.selcount{{font-family:var(--mono);font-size:12px;color:var(--faint)}}
-.btn{{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}}
-.btn:hover{{border-color:var(--accent)}}
-.btn:disabled{{opacity:.5;cursor:default}}
-.btn:disabled:hover{{border-color:var(--border)}}
-.btn.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
-.btn.ok:hover{{border-color:#1f8a44}}
-.cp{{font-family:var(--mono);font-size:11px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;flex:none;
-background:var(--surface-2);border:1px solid var(--border-strong);color:var(--muted);padding:3px 8px;border-radius:6px;
-white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
-.cp:hover{{border-color:var(--accent);color:var(--accent)}}
-.cp.ok{{background:#1f8a44;border-color:#1f8a44;color:#fff}}
-table{{border-collapse:collapse;width:100%;font-size:13.5px;min-width:640px}}
-th,td{{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}}
-th{{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface-2)}}
-th.acth,td.act{{text-align:right;white-space:nowrap}}
-tr:last-child td{{border-bottom:none}}
-.pk{{font-family:var(--mono);font-weight:600}}.eco{{color:var(--faint);font-weight:400;margin-left:7px;font-size:11px}}
-.mono{{font-family:var(--mono);font-variant-numeric:tabular-nums}}
-.fix{{color:var(--low)}}.none{{color:var(--faint)}}
-.sev{{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}}
-.sev.crit{{background:var(--crit-s);color:var(--crit)}}.sev.high{{background:var(--high-s);color:var(--high)}}
-.sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
-.ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.ids a.new{{font-weight:700;text-decoration:underline;text-underline-offset:2px}}.more{{color:var(--faint)}}
-.clean{{color:var(--low);font-size:16px;margin-top:30px}}
-.ackwrap{{margin-top:30px}}
-.ackwrap>summary{{cursor:pointer;list-style:none;font-family:var(--mono);font-size:13px;color:var(--muted);border-top:1px dashed var(--border-strong);padding-top:16px}}
-.ackwrap>summary::-webkit-details-marker{{display:none}}
-.ackwrap>summary:hover{{color:var(--accent)}}
-.ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
-footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
-.hl{{outline:2px solid var(--accent);outline-offset:2px}}{links_css}
-</style>
-<div class="wrap">
-<header>
-<p class="eyebrow">osv-daily · {html.escape(ig("STAMP"))}</p>
-<h1>Vulnerabilities in projects</h1>
-<p class="lede">Scan of <code>{html.escape(ig("TARGET"))}</code> against the OSV database. Sorted by severity. Click an ID for its osv.dev page.{lede_extra}</p>
-<div class="stats">
-<div class="stat"><div class="n">{a_proj}</div><div class="l">projects affected</div></div>
-<div class="stat"><div class="n">{a_pkg}</div><div class="l">packages</div></div>
-<div class="stat"><div class="n">{a_vuln}</div><div class="l">{vuln_l}</div></div>
-<div class="stat crit"><div class="n">{a_crit}</div><div class="l">critical</div></div>
-<div class="stat{' new' if new_vulns > 0 else ''}"><div class="n">{new_vulns}</div><div class="l">new since last scan</div></div>
-</div>
-</header>
-{toolbar}
-{body}
-{acked_html}
-<footer>osv-daily · one scan -> report + notification. {footer_hint} Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
-</div>
-<script>
-(function(){{
-  var b=document.getElementById('toggleAll');
-  if(b){{
-    b.addEventListener('click',function(){{
-      var ds=[].slice.call(document.querySelectorAll('details.proj:not(.acked)'));
-      var open=ds.some(function(d){{return !d.open;}});
-      ds.forEach(function(d){{d.open=open;}});
-      b.textContent=open?'Collapse all':'Expand all';
-    }});
-  }}
-  var selAll=document.getElementById('selAll');
-  var selCount=document.getElementById('selCount');
-  var copySel=document.getElementById('copySel');
-  function sync(){{
-    if(!copySel) return;
-    var n=document.querySelectorAll('input.selp:checked').length;
-    var total=document.querySelectorAll('input.selp').length;
-    if(selCount) selCount.textContent='selected '+n;
-    if(!copySel.classList.contains('ok')) copySel.textContent='Copy mute command ('+n+')';
-    copySel.disabled=(n===0);
-    if(selAll){{
-      selAll.checked=(n===total&&total>0);
-      selAll.indeterminate=(n>0&&n<total);
-    }}
-  }}
-  function copy(cmd,btn){{
-    function done(){{
-      var orig=btn.innerHTML;
-      btn.classList.add('ok'); btn.textContent='✓ copied';
-      setTimeout(function(){{
-        btn.classList.remove('ok');
-        if(btn===copySel) sync(); else btn.innerHTML=orig;
-      }},1500);
-    }}
-    function fb(){{
-      var t=document.createElement('textarea'); t.value=cmd;
-      t.style.position='fixed'; t.style.top='0'; t.style.opacity='0';
-      document.body.appendChild(t); t.focus(); t.select();
-      try{{document.execCommand('copy');}}catch(err){{}}
-      document.body.removeChild(t); done();
-    }}
-    if(navigator.clipboard&&navigator.clipboard.writeText){{ navigator.clipboard.writeText(cmd).then(done,fb); }}
-    else {{ fb(); }}
-  }}
-  document.addEventListener('click',function(e){{
-    if(e.target.closest('input.selp')){{ e.stopPropagation(); return; }}  // check the box, don't toggle the <details>
-    var btn=e.target.closest('.cp');
-    if(!btn) return;
-    e.preventDefault(); e.stopPropagation();   // don't toggle the <details>
-    copy(btn.getAttribute('data-cmd'),btn);
-  }});
-  document.addEventListener('change',function(e){{
-    if(e.target.closest('input.selp')) sync();
-  }});
-  if(selAll){{
-    selAll.addEventListener('change',function(){{
-      [].slice.call(document.querySelectorAll('input.selp')).forEach(function(c){{c.checked=selAll.checked;}});
-      sync();
-    }});
-  }}
-  if(copySel){{
-    copySel.addEventListener('click',function(){{
-      var cmds=[].slice.call(document.querySelectorAll('input.selp:checked')).map(function(c){{
-        return c.getAttribute('data-ack');
-      }});
-      if(!cmds.length) return;
-      copy(cmds.join(' && \\\\\\n'),copySel);
-    }});
-  }}
-  function openAnchor(){{
-    if(!location.hash) return;
-    var el=document.getElementById(location.hash.slice(1));
-    if(!el) return;
-    var p=el;
-    while(p){{
-      if(p.tagName==='DETAILS') p.open=true;
-      p=p.parentElement;
-    }}
-    el.scrollIntoView({{block:'center'}});
-    el.classList.add('hl');
-    setTimeout(function(){{el.classList.remove('hl');}},3000);
-  }}
-  window.addEventListener('load',openAnchor);
-  window.addEventListener('hashchange',openAnchor);
-  sync();
-}})();
-</script>'''
-open(os.environ["OUT"], "w").write(page)
-
-# --- run outcome file (non-probe only: STATE is empty under --probe) --------
-# `new` = this run's new advisory ids per active package fragment; `unseen` =
-# `new` plus the previous run's unseen ids still present in this scan, carried
-# over only while the report has not been opened since that previous run. Acks
-# are NOT applied here — `hiveguard status` applies them live.
-if sf:
-    run_path = os.environ.get("RUN", "")
-    all_keys = {(s, n, i) for s, pk in cur_findings.items() for n, ids in pk.items() for i in ids}
-    this_run_new = []
-    for pr in active:
-        for p in pr["pkgs"]:
-            if not p["new_ids"]:
-                continue
-            this_run_new.append({
-                "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
-                "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
-                "ids": list(p["new_ids"]),
-                "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
-                "project_anchor": "p-" + h12(pr["src"]),
-            })
-    prev_run = None
-    try:
-        with open(run_path) as f:
-            prev_run = json.load(f)
-    except Exception:
-        prev_run = None
-    if not isinstance(prev_run, dict):
-        prev_run = None
-    try:
-        with open(os.environ.get("OPENED", "")) as f:
-            opened = int(f.read().strip())
-    except Exception:
-        opened = 0
-    try:
-        prev_finished = int(prev_run.get("finished_epoch", 0) or 0) if prev_run else 0
-    except Exception:
-        prev_finished = 0
-    carry = (prev_run.get("unseen") or []) if prev_run and opened < prev_finished else []
-    merged = {}
-    for e in carry:
-        if not isinstance(e, dict):
-            continue
-        ids = [i for i in (e.get("ids") or []) if (e.get("src"), e.get("pkg"), i) in all_keys]
-        if ids:
-            merged[(e.get("src"), e.get("pkg"))] = {**e, "ids": ids}
-    for n in this_run_new:                    # this run's metadata wins, ids unioned
-        k = (n["src"], n["pkg"]); m = merged.get(k)
-        merged[k] = n if m is None else {**n, "ids": sorted(set(m["ids"]) | set(n["ids"]))}
-    def order(e):
-        try: sv = float(e.get("sev") or 0)
-        except Exception: sv = 0.0
-        return (-sv, e.get("src") or "", e.get("pkg") or "")
-    unseen = sorted(merged.values(), key=order)
-    this_run_new.sort(key=order)
-    # every active package fragment (the report's Active rows) — what the app
-    # validates report links against; ids = the uncovered ids at scan time
-    active_entries = sorted(({
-        "src": pr["src"], "root": finding_root(pr["src"]), "pkg": p["name"],
-        "version": p["version"], "eco": p["eco"], "sev": p["sev"], "fix": p["fix"] or "",
-        "ids": list(p["ids"]),
-        "anchor": "f-" + h12(pr["src"] + "\0" + p["name"]),
-        "project_anchor": "p-" + h12(pr["src"]),
-    } for pr in active for p in pr["pkgs"]), key=order)
-    roots = {r: {"status": "active" if e["has_active"] else "acked",
-                 "active_vulns": e["av"], "crit_pkgs": e["ac"], "acked_vulns": e["kv"]}
-             for r, e in root_agg.items()}
-    run_doc = {
-        "schema": 1, "ok": True, "rc": int(os.environ.get("SCAN_RC", "0") or 0), "error": None,
-        "started_epoch": int(os.environ.get("STARTED", "0") or 0),
-        "finished_epoch": int(time.time()),
-        "stamp": ig("STAMP"), "target": ig("TARGET"),
-        "counts": state["counts"], "roots": roots,
-        "new": this_run_new, "unseen": unseen, "active": active_entries,
-    }
-    if run_path:
-        os.makedirs(os.path.dirname(run_path) or ".", exist_ok=True)
-        tmp = run_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(run_doc, f, indent=2)
-        os.replace(tmp, run_path)
-PYEOF
+APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" report_python
 
 # active/acked counts computed by python (notification + log use the ACTIVE ones)
 ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
