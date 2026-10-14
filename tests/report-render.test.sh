@@ -259,7 +259,11 @@ mkdir -p "$T/base" && git -C "$HG" archive 9e5df56 bin 2>/dev/null | tar -x -C "
 check "I: 9e5df56 renderer extracted" "yes" "$([ -x "$T/base/bin/osv-daily" ] && echo yes)"
 scan_base() { STUB_JSON="$1" "$T/base/bin/osv-daily" "$T/proj" >/dev/null 2>&1 </dev/null; }
 reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
-diff <(norm "$T/new.html") <(norm "$REPORT") >/dev/null; check "I: links off → identical to 9e5df56" "0" "$?"
+# card heads became "folder name + path" after 9e5df56 (section K); map them back,
+# everything else must stay byte-identical
+legacy_names() { sed -e 's#<span class="pname"><span class="pn">[^<]*</span><span class="pp">\([^<]*\)</span></span>#<span class="pname">\1</span>#g' \
+                     -e '/^\.pn{/d' -e '/^\.pp{/d' -e 's#^\.pname{.*#.pname{flex:1;font-weight:600;word-break:break-word}#'; }
+diff <(norm "$T/new.html" | legacy_names) <(norm "$REPORT") >/dev/null; check "I: links off → identical to 9e5df56 (card heads aside)" "0" "$?"
 untimed='del(.started_epoch, .finished_epoch, .stamp)'
 check "I: run file content as 9e5df56's (times aside)" "$(jq -S "$untimed" "$HIVEGUARD_RUN")" "$(jq -S "$untimed" "$T/new-run.json")"
 check "I: state as 9e5df56's plus the render block (stamp aside)" "$(jq -S 'del(.stamp)' "$HIVEGUARD_STATE")" \
@@ -268,7 +272,7 @@ links_on; strict_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"; cp "$
 reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
 # the links-on report gained the reload-on-return script (appended last) and the
 # leaving-row note's CSS lines after 9e5df56; everything else must be byte-identical
-strip_reload() { norm "$1" | grep -v 'hggone\|\.gone' | awk '{l[NR]=$0} /var K=.hiveguard-reload./{cut=NR-2} END{n=cut?cut-1:NR; for(i=1;i<=n;i++) print l[i]}'; }
+strip_reload() { norm "$1" | legacy_names | grep -v 'hggone\|\.gone' | awk '{l[NR]=$0} /var K=.hiveguard-reload./{cut=NR-2} END{n=cut?cut-1:NR; for(i=1;i<=n;i++) print l[i]}'; }
 check "I: links on → the reload-on-return script is there" "1" "$(grep -c "var K='hiveguard-reload'" "$T/new-on.html")"
 diff <(strip_reload "$T/new-on.html") <(strip_reload "$REPORT") >/dev/null; check "I: links + strict on → identical to 9e5df56 (reload script aside)" "0" "$?"
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
@@ -325,5 +329,15 @@ check "J: no state → 'no scan data' note" "1" "$(printf '%s\n' "$OUT" | grep -
 check "J: no state → no refresh note" "0" "$(printf '%s\n' "$OUT" | grep -c 'refreshed')"
 check "J: no state → no report written" "no-report" "$([ -e "$REPORT" ] && echo report-written || echo no-report)"
 check "J: help mentions the refresh" "1" "$("$HG/bin/osv-ack" --help | grep -c -i 'refresh' | awk '{print ($1>=1)?1:0}')"
+
+# --- K. project card heads: the lockfile's folder name, the path beneath in small type ---
+links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
+SHORT="${SRC/#$HOME\/Projects\//}"
+check "K: active card head = folder name + path" "1" \
+  "$(count "<span class=\"pname\"><span class=\"pn\">app</span><span class=\"pp\">$SHORT</span></span>")"
+"$HG/bin/hiveguard" ack "$SRC" >/dev/null 2>&1 </dev/null
+check "K: acked card head too" "1" \
+  "$(count "<span class=\"pname\"><span class=\"pn\">app</span><span class=\"pp\">$SHORT</span></span>")"
+check "K: the leaving note names the project by its folder" "1" "$(links_on; render; count "querySelector('.pn')")"
 
 exit "$FAILED"

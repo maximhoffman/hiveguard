@@ -7,6 +7,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Report project cards are headed by the lockfile's folder name (e.g. `macmigrate`),
+  with the path beneath in small type — shorter heads, easier to scan.
 - After a report button is clicked, the report reloads itself once you come back to it
   from the app's confirmation dialog (keeping the scroll position and the open project
   cards), so a confirmed *mark as known* shows up without a manual reload. A row or

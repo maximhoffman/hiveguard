@@ -766,6 +766,10 @@ if sf and not render:
 def short(src):
     return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
 
+def proj_name(src):
+    # card head: the lockfile's folder name, big; the path (short) beneath it, small
+    return html.escape(os.path.basename(os.path.dirname(src)) or src)
+
 def cp_btn(cmd, label):
     return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
             f'title="Copy this command, then paste it in your terminal">{html.escape(label)}</button>')
@@ -875,7 +879,7 @@ def proj_card(pr, muted):
     return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
             f'<span class="chev">▶</span>{sel}'
             f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
-            f'<span class="pname">{short(pr["src"])}</span>{whole}'
+            f'<span class="pname"><span class="pn">{proj_name(pr["src"])}</span><span class="pp">{short(pr["src"])}</span></span>{whole}'
             f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
             f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
             f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
@@ -971,7 +975,7 @@ links_js = (r'''
       var row=a.closest('tr[id]'), card=a.closest('details.proj[id]'), el=row||card;
       if(el){
         var pk=row && row.querySelector('td.pk'), ver=row && row.querySelector('td.mono');
-        var rp=row && row.previousElementSibling, cp=card && card.previousElementSibling, pn=card && card.querySelector('.pname');
+        var rp=row && row.previousElementSibling, cp=card && card.previousElementSibling, pn=card && card.querySelector('.pn');
         leave={id:el.id, kind:row?'row':'card', card:card?card.id:'', prev:(rp&&rp.id)||'', cardPrev:(cp&&cp.id)||'',
                label:row ? (((pk&&pk.firstChild)?pk.firstChild.textContent:'')+' '+(ver?ver.textContent:'')).trim() : '',
                project:pn ? pn.textContent : ''};
@@ -1026,7 +1030,9 @@ details.proj>summary::-webkit-details-marker{{display:none}}
 details.proj>summary:hover{{background:var(--surface-2)}}
 .chev{{color:var(--faint);transition:transform .15s;font-size:11px}}
 details.proj[open]>summary .chev{{transform:rotate(90deg)}}
-.pname{{flex:1;font-weight:600;word-break:break-word}}
+.pname{{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}}
+.pn{{font-weight:600;word-break:break-word}}
+.pp{{font-size:11px;font-weight:400;color:var(--faint);word-break:break-all}}
 .cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
 .whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
 .tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}
