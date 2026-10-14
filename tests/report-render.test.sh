@@ -275,5 +275,51 @@ check "I: run file active entry keys" "anchor,eco,fix,ids,pkg,project_anchor,roo
 check "I: no .tmp left" "0" "$(ls "$HOME/.hiveguard" | grep -c '\.tmp$')"
 
 # --- J. osv-ack refreshes by itself (H9) ---
+links_off; strict_off; reset_scan; rm -f "$REPORT"; scan "$T/run1.json"; scan "$T/run2.json"
+cp "$REPORT" "$T/scan.html"; S0="$(scan_sig)"; rm -f "$T_LOG_NOTIFY"
+L0="$(wc -l < "$HOME/.hiveguard/osv-daily.log" | tr -d ' ')"; touch -t 202601010000 "$REPORT"
+OUT="$("$HG/bin/hiveguard" ack "$SRC" fast-uri </dev/null)"; check "J: ack rc" "0" "$?"
+check "J: ack prints the refreshed line last" "  report and folder markers refreshed (reload the report if it is open)" "$(printf '%s\n' "$OUT" | tail -n1)"
+check "J: ack output has 3 lines" "3" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "J: unmute / mute buttons without an explicit render" "1 1" "$(count '>unmute</button>') $(count '>mute</button>')"
+check "J: markers" "$T/proj/app${TAB}active${TAB}1 active vulnerabilities (1 critical)" "$(cat "$HIVEGUARD_MARKERS")"
+check "J: report mtime kept" "202601010000" "$(date -r "$(mtime "$REPORT")" '+%Y%m%d%H%M')"
+check "J: scan state untouched" "$S0" "$(scan_sig)"
+check "J: no notification" "silent" "$([ -e "$T_LOG_NOTIFY" ] && echo notified || echo silent)"
+check "J: render log line" "1" \
+  "$(tail -n1 "$HOME/.hiveguard/osv-daily.log" | grep -c '] render projects=1 pkgs=1 vulns=1 crit=1 (acked: vulns=3 pkgs=1) markers=R1,Y0 → ')"
+check "J: whole-project ack refreshes" "  report and folder markers refreshed (reload the report if it is open)" \
+  "$("$HG/bin/hiveguard" ack "$SRC" </dev/null | tail -n1)"
+check "J: markers acked" "$T/proj/app${TAB}acked${TAB}4 acknowledged" "$(cat "$HIVEGUARD_MARKERS")"
+check "J: clean report" "1" "$(count '✅ No active vulnerabilities — everything found is acknowledged.')"
+check "J: --remove refreshes" "  report and folder markers refreshed (reload the report if it is open)" \
+  "$("$HG/bin/hiveguard" ack --remove "$SRC" </dev/null | tail -n1)"
+check "J: markers active again" "$T/proj/app${TAB}active${TAB}4 active vulnerabilities (1 critical)" "$(cat "$HIVEGUARD_MARKERS")"
+cmp -s "$T/scan.html" "$REPORT"; check "J: back to the scan report" "0" "$?"
+"$HG/bin/hiveguard" ack "$SRC" lodash >/dev/null </dev/null
+check "J: lodash muted in the report" "1" "$(count '>unmute</button>')"
+check "J: --clear refreshes" "  report and folder markers refreshed (reload the report if it is open)" \
+  "$("$HG/bin/hiveguard" ack --clear </dev/null | tail -n1)"
+cmp -s "$T/scan.html" "$REPORT"; check "J: --clear back to the scan report" "0" "$?"
+check "J: five render log lines" "5" "$(( $(wc -l < "$HOME/.hiveguard/osv-daily.log" | tr -d ' ') - L0 ))"
+# failure paths: the ack is applied, the note goes to stderr, exit 0
+printf '%s' "$$" > "$HIVEGUARD_SCAN_PID"
+OUT="$("$HG/bin/hiveguard" ack "$SRC" lodash 2>&1 >/dev/null </dev/null)"; RC=$?; rm -f "$HIVEGUARD_SCAN_PID"
+check "J: scan running → rc 0" "0" "$RC"
+check "J: scan running → note" "  (report not refreshed: a scan is in progress (pid $$); it writes a fresh report itself)" "$OUT"
+check "J: scan running → the ack went through" "1" "$("$HG/bin/hiveguard" ack --list | grep -c 'lodash')"
+R0="$(md5 -q "$REPORT")"; cp "$HIVEGUARD_STATE" "$T/state.bak"; jq 'del(.render)' "$T/state.bak" > "$HIVEGUARD_STATE"
+OUT="$("$HG/bin/hiveguard" ack --remove "$SRC" lodash 2>&1 >/dev/null </dev/null)"; RC=$?; cp "$T/state.bak" "$HIVEGUARD_STATE"
+check "J: predates → rc 0" "0" "$RC"
+check "J: predates → note" "  (report not refreshed: the saved scan predates report re-rendering — run: hiveguard daily)" "$OUT"
+check "J: predates → report kept" "$R0" "$(md5 -q "$REPORT")"
+check "J: predates → the un-mute went through" "0" "$("$HG/bin/hiveguard" ack --list | grep -c 'lodash')"
+rm -f "$HIVEGUARD_STATE" "$REPORT"
+OUT="$("$HG/bin/hiveguard" ack "$SRC" lodash 2>&1 </dev/null)"; RC=$?
+check "J: no state → rc 0" "0" "$RC"
+check "J: no state → 'no scan data' note" "1" "$(printf '%s\n' "$OUT" | grep -c 'no scan data')"
+check "J: no state → no refresh note" "0" "$(printf '%s\n' "$OUT" | grep -c 'refreshed')"
+check "J: no state → no report written" "no-report" "$([ -e "$REPORT" ] && echo report-written || echo no-report)"
+check "J: help mentions the refresh" "1" "$("$HG/bin/osv-ack" --help | grep -c -i 'refresh' | awk '{print ($1>=1)?1:0}')"
 
 exit "$FAILED"

@@ -19,6 +19,11 @@
 #   hiveguard ack --clear                   # drop every acknowledgement
 #   hiveguard ack -h|--help|help            # show this help
 #
+# After every change (mute, --remove, --clear) the report and the folder markers
+# are refreshed from the last scan's saved results — no new scan; reload the
+# report. A refresh that cannot happen (no saved scan, scan in progress, a scan
+# older than this feature) is reported on stderr and never fails the ack.
+#
 # Re-running ack on an already-muted entry re-snapshots the current advisories
 # and overwrites the stored set — that's how you "accept" a newly-surfaced
 # advisory (fold it into the mute); no separate verb.
@@ -33,6 +38,7 @@ command -v jq >/dev/null || { echo "jq required (brew install jq)"; exit 1; }
 
 STORE="${HIVEGUARD_ACKS:-$HOME/.hiveguard/osv-acks.json}"
 STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
+here="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$(dirname "$STORE")"
 [ -f "$STORE" ] || printf '{"schema":2,"projects":{},"packages":{}}\n' > "$STORE"
 # repair an unreadable/empty store rather than failing every command
@@ -55,11 +61,26 @@ MIGRATE='def to_v2:
   } end;'
 
 usage() {
-  local here; here="$(cd "$(dirname "$0")" && pwd)"
   if [ -t 1 ]; then awk -v pretty=1 -f "$here/help.awk" "$0"; else awk -v pretty=0 -f "$here/help.awk" "$0"; fi
 }
 save()  { local tmp; tmp="$(mktemp)"; cat > "$tmp"; mv "$tmp" "$STORE"; }
 today() { date +%Y-%m-%d; }
+
+# Re-render the report and refresh the folder markers from the saved scan.
+# Never fails the ack: a refresh that cannot happen is a note on stderr.
+refresh_report() {
+  [ -f "$STATE" ] || return 0
+  local err reason; err="$(mktemp)"
+  if "$here/osv-daily" --render >/dev/null 2>"$err" </dev/null; then
+    echo "  report and folder markers refreshed (reload the report if it is open)"
+  else
+    reason="$(tail -n1 "$err" | sed 's/^osv-daily: //')"
+    [ -n "$reason" ] || reason="osv-daily --render failed"
+    echo "  (report not refreshed: $reason)" >&2
+  fi
+  rm -f "$err"
+  return 0
+}
 
 # Print the advisory IDs known for a (path[,pkg]) from the last-scan state file.
 # Emits compact JSON: an array for a package, an object for a project, or "null"
@@ -104,7 +125,8 @@ case "${1:-}" in
 
   --clear)
     printf '{"schema":2,"projects":{},"packages":{}}\n' > "$STORE"
-    echo "✔ cleared all acknowledgements" ;;
+    echo "✔ cleared all acknowledgements"
+    refresh_report ;;
 
   --remove|--rm|-r)
     shift
@@ -117,10 +139,12 @@ case "${1:-}" in
         | (if (.packages[$p] | length) == 0 then del(.packages[$p]) else . end)' \
         --arg p "$path" --arg k "$pkg" "$STORE" | save
       echo "✔ un-muted package: $pkg  (in $path)"
+      refresh_report
     else
       jq "$MIGRATE"' to_v2 | del(.projects[$p]) | del(.packages[$p])' \
         --arg p "$path" "$STORE" | save
       echo "✔ un-muted project: $path"
+      refresh_report
     fi ;;
 
   -*)
@@ -142,6 +166,7 @@ case "${1:-}" in
         echo "✔ muted package: $pkg  (in $path) — $n known advisories acknowledged; NEW future advisories will still alert."
       fi
       echo "  undo: hiveguard ack --remove \"$path\" $pkg"
+      refresh_report
     else
       ids="$(state_proj "$path")"
       jq "$MIGRATE"' to_v2 | .projects[$p] = {ids: $ids, since: $since}' \
@@ -155,5 +180,6 @@ case "${1:-}" in
         echo "✔ muted project: $path — $n known advisories acknowledged across the project; NEW future advisories will still alert."
       fi
       echo "  undo: hiveguard ack --remove \"$path\""
+      refresh_report
     fi ;;
 esac
