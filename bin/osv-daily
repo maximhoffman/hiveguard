@@ -766,9 +766,27 @@ if sf and not render:
 def short(src):
     return html.escape(src.replace(os.path.expanduser("~/Projects/"), ""))
 
+# card head: the lockfile's folder name, big; the path (short) beneath it, small.
+# A generic folder name gets its parent ("reconnect-ident / go"); when one folder
+# holds several lockfiles, each head carries a small package-manager tag.
+GENERIC_DIRS = {"go", "app", "src", "server", "client", "backend", "frontend", "web", "api"}
+LOCK_TAGS = {"package-lock.json": "npm", "npm-shrinkwrap.json": "npm", "pnpm-lock.yaml": "pnpm",
+             "yarn.lock": "yarn", "bun.lock": "bun", "bun.lockb": "bun", "Cargo.lock": "cargo",
+             "go.mod": "go", "go.sum": "go", "Gemfile.lock": "bundler", "poetry.lock": "poetry",
+             "Pipfile.lock": "pipenv", "uv.lock": "uv", "requirements.txt": "pip",
+             "composer.lock": "composer", "mix.lock": "mix"}
+lock_dirs = {}   # folder -> number of distinct lockfiles in this report (filled before rendering)
+
 def proj_name(src):
-    # card head: the lockfile's folder name, big; the path (short) beneath it, small
-    return html.escape(os.path.basename(os.path.dirname(src)) or src)
+    d = os.path.dirname(src)
+    name = os.path.basename(d) or src
+    if name.lower() in GENERIC_DIRS and os.path.basename(os.path.dirname(d)):
+        name = os.path.basename(os.path.dirname(d)) + " / " + name
+    tag = ""
+    if lock_dirs.get(d, 0) > 1:
+        f = os.path.basename(src)
+        tag = f'<span class="lt">{html.escape(LOCK_TAGS.get(f, f))}</span>'
+    return html.escape(name) + tag
 
 def cp_btn(cmd, label):
     return (f'<button class="cp" type="button" data-cmd="{html.escape(cmd)}" '
@@ -884,6 +902,9 @@ def proj_card(pr, muted):
             f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
             f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
             f'<tbody>{rows}</tbody></table></div></details>')
+
+for _s in {pr["src"] for pr in active + acked}:
+    lock_dirs[os.path.dirname(_s)] = lock_dirs.get(os.path.dirname(_s), 0) + 1
 
 if active:
     body = "".join(proj_card(pr, False) for pr in active)
@@ -1033,6 +1054,7 @@ details.proj[open]>summary .chev{{transform:rotate(90deg)}}
 .pname{{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}}
 .pn{{font-weight:600;word-break:break-word}}
 .pp{{font-size:11px;font-weight:400;color:var(--faint);word-break:break-all}}
+.lt{{margin-left:8px;font-size:10px;font-weight:400;color:var(--muted);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;vertical-align:2px}}
 .cnt{{font-size:12px;color:var(--faint);font-weight:400;white-space:nowrap}}
 .whole{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
 .tblwrap{{overflow-x:auto;border:none;border-top:1px solid var(--border)}}

@@ -262,7 +262,7 @@ reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
 # card heads became "folder name + path" after 9e5df56 (section K); map them back,
 # everything else must stay byte-identical
 legacy_names() { sed -e 's#<span class="pname"><span class="pn">[^<]*</span><span class="pp">\([^<]*\)</span></span>#<span class="pname">\1</span>#g' \
-                     -e '/^\.pn{/d' -e '/^\.pp{/d' -e 's#^\.pname{.*#.pname{flex:1;font-weight:600;word-break:break-word}#'; }
+                     -e '/^\.pn{/d' -e '/^\.pp{/d' -e '/^\.lt{/d' -e 's#^\.pname{.*#.pname{flex:1;font-weight:600;word-break:break-word}#'; }
 diff <(norm "$T/new.html" | legacy_names) <(norm "$REPORT") >/dev/null; check "I: links off → identical to 9e5df56 (card heads aside)" "0" "$?"
 untimed='del(.started_epoch, .finished_epoch, .stamp)'
 check "I: run file content as 9e5df56's (times aside)" "$(jq -S "$untimed" "$HIVEGUARD_RUN")" "$(jq -S "$untimed" "$T/new-run.json")"
@@ -333,11 +333,20 @@ check "J: help mentions the refresh" "1" "$("$HG/bin/osv-ack" --help | grep -c -
 # --- K. project card heads: the lockfile's folder name, the path beneath in small type ---
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 SHORT="${SRC/#$HOME\/Projects\//}"
+# "app" is a generic folder name → shown with its parent: "proj / app"
 check "K: active card head = folder name + path" "1" \
-  "$(count "<span class=\"pname\"><span class=\"pn\">app</span><span class=\"pp\">$SHORT</span></span>")"
+  "$(count "<span class=\"pname\"><span class=\"pn\">proj / app</span><span class=\"pp\">$SHORT</span></span>")"
 "$HG/bin/hiveguard" ack "$SRC" >/dev/null 2>&1 </dev/null
 check "K: acked card head too" "1" \
-  "$(count "<span class=\"pname\"><span class=\"pn\">app</span><span class=\"pp\">$SHORT</span></span>")"
+  "$(count "<span class=\"pname\"><span class=\"pn\">proj / app</span><span class=\"pp\">$SHORT</span></span>")"
+check "K: one lockfile in the folder → no lockfile tag" "0" "$(count 'class="lt"')"
+# two lockfiles in one folder → each head carries a small package-manager tag
+SRC2="$T/proj/app/yarn.lock"; : > "$SRC2"
+jq --arg s2 "$SRC2" '.results += [.results[0] | .source.path=$s2]' "$T/run1.json" > "$T/two.json"
+reset_scan; scan "$T/two.json"; scan "$T/two.json"
+check "K: two lockfiles → npm tag" "1" "$(count '<span class="pn">proj / app<span class="lt">npm</span></span>')"
+check "K: two lockfiles → yarn tag" "1" "$(count '<span class="pn">proj / app<span class="lt">yarn</span></span>')"
+rm -f "$SRC2"
 check "K: the leaving note names the project by its folder" "1" "$(links_on; render; count "querySelector('.pn')")"
 
 exit "$FAILED"
