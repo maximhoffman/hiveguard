@@ -7,6 +7,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- After a report button is clicked, the report reloads itself once you come back to it
+  from the app's confirmation dialog (keeping the scroll position and the open project
+  cards), so a confirmed *mark as known* shows up without a manual reload. Only in
+  reports rendered while the app is running.
 - Report action buttons: when the companion menu bar app is running at scan time, the
   report's active rows and project cards get *mark as known*, *mark project as known*
   and (with strict mode on) *pause strict 1 h / 2 h* buttons that hand off to the app,

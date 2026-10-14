@@ -266,7 +266,11 @@ check "I: state as 9e5df56's plus the render block (stamp aside)" "$(jq -S 'del(
   "$(jq -S 'del(.stamp, .render)' "$T/new-state.json")"
 links_on; strict_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"; cp "$REPORT" "$T/new-on.html"
 reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
-diff <(norm "$T/new-on.html") <(norm "$REPORT") >/dev/null; check "I: links + strict on → identical to 9e5df56" "0" "$?"
+# the links-on report gained the reload-on-return script after 9e5df56 (appended
+# last); everything before it must still be byte-identical
+strip_reload() { norm "$1" | awk '{l[NR]=$0} /var K=.hiveguard-reload./{cut=NR-2} END{n=cut?cut-1:NR; for(i=1;i<=n;i++) print l[i]}'; }
+check "I: links on → the reload-on-return script is there" "1" "$(grep -c "var K='hiveguard-reload'" "$T/new-on.html")"
+diff <(strip_reload "$T/new-on.html") <(strip_reload "$REPORT") >/dev/null; check "I: links + strict on → identical to 9e5df56 (reload script aside)" "0" "$?"
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "I: run file keys" "active,counts,error,finished_epoch,new,ok,rc,roots,schema,stamp,started_epoch,target,unseen" \
   "$(jq -r 'keys|join(",")' "$HIVEGUARD_RUN")"

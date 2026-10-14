@@ -915,6 +915,26 @@ links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
              "\n.act-link.pause:hover{background:var(--high);color:#fff}"
              "\n.cp.cp-alt{font-size:10px;padding:2px 6px;opacity:.7}"
              "\n.cp.cp-alt:hover{opacity:1}") if links_on else ""
+# links-only: after a button click the page reloads when the user comes back to it
+# (the app's dialog took the focus away), keeping the scroll position and the open
+# project cards. Armed for 2 min after a click; a return counts only after ≥1.2 s
+# away, so the throwaway tab's flash does not use it up — an early reload is
+# harmless (same report), the next return after the dialog shows the result.
+links_js = ("\n<script>\n(function(){\n"
+            "  var K='hiveguard-reload', ARM=120000, AWAY=1200, s=null, away=0;\n"
+            "  try{ s=JSON.parse(sessionStorage.getItem(K)||'null'); }catch(e){}\n"
+            "  if(s){ (s.open||[]).forEach(function(id){ var d=document.getElementById(id); if(d) d.open=true; });\n"
+            "         if(typeof s.y==='number') window.scrollTo(0,s.y); }\n"
+            "  var until=(s&&s.until)||0;\n"
+            "  function save(){ try{ sessionStorage.setItem(K, JSON.stringify({until:until, y:window.scrollY,\n"
+            "    open:[].map.call(document.querySelectorAll('details[open][id]'), function(d){ return d.id; })})); }catch(e){} }\n"
+            "  document.addEventListener('click', function(e){\n"
+            "    if(e.target.closest && e.target.closest('a[href^=\"hiveguard:\"]')){ until=Date.now()+ARM; save(); } }, true);\n"
+            "  window.addEventListener('blur', function(){ if(Date.now()<until) away=Date.now(); });\n"
+            "  window.addEventListener('focus', function(){\n"
+            "    var back=away && Date.now()<until && Date.now()-away>=AWAY; away=0;\n"
+            "    if(back){ save(); location.reload(); } });\n"
+            "})();\n</script>") if links_on else ""
 footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
                "“copy” gives the terminal command instead." if links_on else
                "Mute an old project with the “mute” button (→ hiveguard ack).")
@@ -1102,7 +1122,7 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
   window.addEventListener('hashchange',openAnchor);
   sync();
 }})();
-</script>'''
+</script>{links_js}'''
 # atomic: a browser reload during the write never sees a half page. --render
 # keeps the report's modification time — the scan's (or, when the report is
 # missing, the state file's, written at scan end) — so --if-due and the

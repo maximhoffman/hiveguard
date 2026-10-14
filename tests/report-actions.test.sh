@@ -120,6 +120,7 @@ dead_pid() { sh -c 'exit 0' & p=$!; wait "$p" 2>/dev/null; printf '%s' "$p"; }
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "off: no hiveguard:// link"           "0" "$(count 'hiveguard://')"
 check "off: no act-link"                     "0" "$(count 'act-link')"
+check "off: no reload-on-return script"      "0" "$(count 'hiveguard-reload')"
 check "off: no cp-alt"                       "0" "$(count 'cp-alt')"
 check "off: no actg span"                    "0" "$(count 'actg')"
 check "off: today's copy buttons (mute x2, mute project)" "3" "$(count 'class="cp"')"
@@ -137,6 +138,9 @@ links_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "on: act-link count"                    "3" "$(count 'class="act-link')"
 # a hiveguard:// link followed in the report's own tab makes Opera/Chromium close that tab
 check "on: every act-link opens in a new tab"  "3" "$(count 'class="act-link[^>]*" target="_blank" rel="noopener">')"
+# after a button click the page reloads once the user comes back from the app's dialog
+check "on: reload-on-return script, once"      "1" "$(count "var K='hiveguard-reload'")"
+check "on: it arms on a hiveguard: link click"  "1" "$(count "closest('a\[href^=\"hiveguard:\"\]')")"
 check "on: fast-uri ack href" "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=fast-uri\"")"
 check "on: lodash ack href"   "1" "$(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=lodash\"")"
 check "on: ack-project href"  "1" "$(count "href=\"hiveguard://ack-project?v=1&amp;src=$ENC\"")"
