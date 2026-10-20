@@ -1,0 +1,756 @@
+{
+ "results": [
+  {
+   "source": {
+    "path": "__SRC_GO__",
+    "type": "lockfile"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "golang.org/x/net",
+      "version": "0.57.0",
+      "ecosystem": "Go"
+     },
+     "vulnerabilities": [
+      {
+       "id": "GO-2026-6603",
+       "summary": "HTTP/2 server memory exhaustion due to Trailer headers in net/http",
+       "details": "When \"Trailer\" headers are sent by a client, the HTTP server internally uses the header values to populate the Request.Trailer map passed to the server handler. Because Request.Trailer is a map, each entry incurs memory overhead. For HTTP/2 servers, a malicious client can exploit this by sending a \"Trailer\" header that declares a large number of fields, causing the server to allocate a disproportionate amount of memory while bypassing Server.MaxHeaderValueCount and Server.MaxHeaderBytes limits. This exploit is not applicable for HTTP/1 servers, which do not support multiplexing a large number of requests over one TCP connection, and whose Server.MaxHeaderBytes are calculated differently.",
+       "aliases": [
+        "BIT-golang-2026-78659",
+        "CVE-2026-78659"
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.26.9"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.27.0-0"
+            },
+            {
+             "fixed": "1.27.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "0.60.0"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "id": "GO-2026-6610",
+       "summary": "HTTP/2 transport accepts malformed framing-related headers in net/http",
+       "details": "Historically, we have been rather lax about malformed framing-related headers in our HTTP/2 implementation, as they cannot interfere with HTTP/2 framing. However, this makes it possible for our HTTP/2 implementation to forward responses containing such headers to an HTTP/1 client when acting as a reverse proxy. If the HTTP/1 client also does not behave strictly enough, this can result in response smuggling.",
+       "aliases": [
+        "BIT-golang-2026-78660",
+        "CVE-2026-78660"
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.26.9"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.27.0-0"
+            },
+            {
+             "fixed": "1.27.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "0.60.0"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "id": "GO-2026-6611",
+       "summary": "Excessive CPU consumption from repeated initial window changes in net/http",
+       "details": "A malicious HTTP/2 peer can cause excessive CPU consumption in the client or server by opening a large number of streams and then sending many small SETTINGS frames containing SETTINGS_INITIAL_WINDOW_SIZE values.",
+       "aliases": [
+        "BIT-golang-2026-78669",
+        "CVE-2026-78669"
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.26.9"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.27.0-0"
+            },
+            {
+             "fixed": "1.27.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "0.60.0"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "id": "GO-2026-6612",
+       "summary": "Double flow control refund on HTTP/2 server streams in net/http",
+       "details": "The HTTP/2 server can refund connection-level flow control twice for the same data: Once when a client resets a stream (refunding data for any sent-but-unread portion of the stream), and again when a request handler reads the buffered data. A malicious client can exploit this to bypass the configured connection-level flow control limit (MaxReceiveBufferPerConnection). Total buffered data is still limited by the concurrent stream limit and stream-level flow control.",
+       "aliases": [
+        "BIT-golang-2026-78663",
+        "CVE-2026-78663"
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.26.9"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.27.0-0"
+            },
+            {
+             "fixed": "1.27.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "0.60.0"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "id": "GO-2026-6617",
+       "summary": "HTTP/2 server crash due to HPACK encoder race in net/http",
+       "details": "HTTP/2 servers could end up crashing due to inadvertently modifying its HPACK encoder concurrently. This happens because the server modifies the HPACK encoder from two goroutines without synchronization: one uses the encoder to encode a HEADERS frame as part of a response sent to a client and the other modifies the encoder's table size when handling a SETTINGS frame containing SETTINGS_HEADER_TABLE_SIZE that a client sends. A malicious client can repeatedly send a request while changing the header table size to crash the server.",
+       "aliases": [
+        "BIT-golang-2026-97032",
+        "CVE-2026-97032"
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "1.26.9"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "stdlib",
+          "purl": "pkg:golang/stdlib"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "1.27.0-0"
+            },
+            {
+             "fixed": "1.27.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "Go",
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "0.60.0"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "groups": [
+      {
+       "ids": [
+        "GO-2026-6603"
+       ],
+       "aliases": [
+        "BIT-golang-2026-78659",
+        "CVE-2026-78659",
+        "GO-2026-6603"
+       ],
+       "max_severity": ""
+      },
+      {
+       "ids": [
+        "GO-2026-6610"
+       ],
+       "aliases": [
+        "BIT-golang-2026-78660",
+        "CVE-2026-78660",
+        "GO-2026-6610"
+       ],
+       "max_severity": ""
+      },
+      {
+       "ids": [
+        "GO-2026-6611"
+       ],
+       "aliases": [
+        "BIT-golang-2026-78669",
+        "CVE-2026-78669",
+        "GO-2026-6611"
+       ],
+       "max_severity": ""
+      },
+      {
+       "ids": [
+        "GO-2026-6612"
+       ],
+       "aliases": [
+        "BIT-golang-2026-78663",
+        "CVE-2026-78663",
+        "GO-2026-6612"
+       ],
+       "max_severity": ""
+      },
+      {
+       "ids": [
+        "GO-2026-6617"
+       ],
+       "aliases": [
+        "BIT-golang-2026-97032",
+        "CVE-2026-97032",
+        "GO-2026-6617"
+       ],
+       "max_severity": ""
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "source": {
+    "path": "__SRC_NPM__",
+    "type": "lockfile"
+   },
+   "packages": [
+    {
+     "package": {
+      "name": "@vitest/mocker",
+      "version": "3.2.7",
+      "ecosystem": "npm"
+     },
+     "vulnerabilities": [
+      {
+       "id": "GHSA-82fw-gwwq-j7x9",
+       "summary": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
+       "details": "## Summary\n`@vitest/mocker` registers a redirect mock's target path without validating it\nagainst the dev server's file-serving allowlist. An attacker who can reach the\ndev server's WebSocket can register a redirect mock pointing outside the project\nroot; when the mocked module is requested, the plugin's `load` hook returns\n`readFile(<attacker path>)` as the module source, disclosing local files.\n\nThis is exploitable **without authentication** only through the public\n`mockerPlugin` / standalone `interceptorPlugin` exports (used by third-party dev\nservers), which register the handler on Vite's unauthenticated HMR socket.\nVitest's own browser mode registers mocks over a **token-authenticated** RPC and\nis not remotely reachable by default (see Scope).\n\n## Affected code\n`packages/mocker/src/node/interceptorPlugin.ts`.\n\nThe `load` hook is the file-read sink:\n\n```ts\nif (mock.type === 'redirect') {\n  return readFile(mock.redirect, 'utf-8')\n}\n```\n\n`mock.redirect` is derived from client input at registration time with no\nboundary check:\n\n```ts\nif (event.type === 'redirect') {\n  const redirectUrl = new URL(event.redirect)\n  event.redirect = join(server.config.root, redirectUrl.pathname)\n}\nregistry.register(event)\n```\n\nThere is no `server.fs.allow` / `server.fs.deny` check and no assertion that the\nresolved path stays within the project root.\n\n## Registration paths and trust boundaries\n- **Public `mockerPlugin` / `interceptorPlugin` (unauthenticated).** In\n  `configureServer`, the plugin registers `server.ws.on('vitest:interceptor:register', \u2026)`\n  on Vite's HMR WebSocket. That socket performs no token, Origin, or same-origin\n  check, so any client that can reach it can register a redirect mock. This is\n  the path the \"unauthenticated\" impact applies to.\n- **Vitest browser mode (authenticated).** Mocks register over the browser RPC\n  (`registerMock`), which sits behind a per-run token (`isValidApiRequest`, a\n  random `api.token`). The interceptor's `configureServer` socket is not used for\n  registration here (in v5 it does not run at all, as the plugin is injected per\n  environment). The same missing boundary check exists on the authenticated RPC\n  path, but reaching it requires the token, so it is not a remote-unauthenticated\n  read.\n\n## Path handling\n`new URL(redirect).pathname` combined with `join(root, pathname)` does **not**\nconfine reads to the root:\n\n- Special/hierarchical schemes (`file:`, `http:`) are normalized by WHATWG URL,\n  so `..` segments are collapsed and the result stays under the root. Payloads of\n  the form `file:///../../etc/passwd` do **not** escape.\n- A non-special (opaque) scheme preserves `..` in `pathname`, so\n  `join(root, \"../../\u2026/etc/passwd\")` resolves outside the root and reads an\n  arbitrary file.\n\nEven without escaping the root, the missing `server.fs` check allows reading any\nin-root file the dev server would otherwise refuse to serve (for example an\nin-root `.env` or source that is denied by `server.fs.deny`).\n\n## Scope / preconditions\n- This is a **development-server** issue. The dev server binds to `localhost` by\n  default and is not reachable from the network unless the developer exposes it\n  (`server.host` / `0.0.0.0`, a LAN bind, or a proxy).\n- A raw (non-browser) client against a reachable server bypasses browser origin\n  and CORS protections entirely and can both register the mock and read the\n  response.\n- A browser-based drive-by against a localhost server is substantially mitigated\n  by Vite defaults: the default CORS origin allowlist is limited to `localhost`\n  origins, and `server.allowedHosts` blocks DNS-rebinding, so a cross-origin page\n  cannot read the file contents back.\n\n## Impact\nDisclosure of local files readable by the dev-server process (source, in-root\n`.env`/secrets, and, via the opaque-scheme payload, files outside the project\nroot). No integrity or availability impact.\n\n## Affected versions\nPresent since `@vitest/mocker` was introduced.\n\n- **Affected: `@vitest/mocker` >= 2.1.0** (shipped in `vitest` and\n  `@vitest/browser` >= 2.1.0), through 4.1.x and the 5.0.0 pre-releases.\n- **Fixed:** Vitest 4.1.11 and 5.0.0. Older majors (2.1.x, 3.x) are not\n  maintained and are not planned to receive the fix.\n\n## Fix\nValidate the resolved redirect target against Vite's file-serving allowlist\n(`isFileLoadingAllowed`) before registering it, at every registration site, and\nstop registering the interceptor WebSocket events in Vitest's browser mode\n(mocks there flow through the authenticated RPC).",
+       "aliases": [
+        "CVE-2026-84373"
+       ],
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@vitest/mocker",
+          "purl": "pkg:npm/%40vitest/mocker"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "2.1.0"
+            },
+            {
+             "fixed": "4.1.11"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "vitest",
+          "purl": "pkg:npm/vitest"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "2.1.0"
+            },
+            {
+             "fixed": "4.1.11"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "vitest",
+          "purl": "pkg:npm/vitest"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "5.0.0-beta.1"
+            },
+            {
+             "fixed": "5.0.0-rc.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@vitest/mocker",
+          "purl": "pkg:npm/%40vitest/mocker"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "5.0.0-beta.1"
+            },
+            {
+             "fixed": "5.0.0-rc.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "groups": [
+      {
+       "ids": [
+        "GHSA-82fw-gwwq-j7x9"
+       ],
+       "aliases": [
+        "CVE-2026-84373",
+        "GHSA-82fw-gwwq-j7x9"
+       ],
+       "max_severity": "5.9"
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "nanoid",
+      "version": "3.3.16",
+      "ecosystem": "npm"
+     },
+     "vulnerabilities": [
+      {
+       "id": "GHSA-2v37-7h3g-55p8",
+       "summary": "nanoid: custom generators can loop indefinitely when size is zero",
+       "details": "nanoid (Nano ID) before 5.1.6 contains an infinite loop in the customAlphabet and customRandom functions. When these functions are configured with a size of 0, the internal generation loop never satisfies its exit condition and spins indefinitely, hanging the calling thread. An application that passes an unvalidated, attacker-controlled size of 0 to these functions is exposed to a denial-of-service condition.",
+       "aliases": [
+        "CVE-2026-67213"
+       ],
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+         "type": "CVSS_V3"
+        },
+        {
+         "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+         "type": "CVSS_V4"
+        }
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "nanoid",
+          "purl": "pkg:npm/nanoid"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "0"
+            },
+            {
+             "fixed": "3.3.18"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "nanoid",
+          "purl": "pkg:npm/nanoid"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "4.0.0"
+            },
+            {
+             "fixed": "5.1.6"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "groups": [
+      {
+       "ids": [
+        "GHSA-2v37-7h3g-55p8"
+       ],
+       "aliases": [
+        "CVE-2026-67213",
+        "GHSA-2v37-7h3g-55p8"
+       ],
+       "max_severity": "8.2"
+      }
+     ]
+    },
+    {
+     "package": {
+      "name": "vitest",
+      "version": "3.2.7",
+      "ecosystem": "npm"
+     },
+     "vulnerabilities": [
+      {
+       "id": "GHSA-82fw-gwwq-j7x9",
+       "summary": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
+       "details": "## Summary\n`@vitest/mocker` registers a redirect mock's target path without validating it\nagainst the dev server's file-serving allowlist. An attacker who can reach the\ndev server's WebSocket can register a redirect mock pointing outside the project\nroot; when the mocked module is requested, the plugin's `load` hook returns\n`readFile(<attacker path>)` as the module source, disclosing local files.\n\nThis is exploitable **without authentication** only through the public\n`mockerPlugin` / standalone `interceptorPlugin` exports (used by third-party dev\nservers), which register the handler on Vite's unauthenticated HMR socket.\nVitest's own browser mode registers mocks over a **token-authenticated** RPC and\nis not remotely reachable by default (see Scope).\n\n## Affected code\n`packages/mocker/src/node/interceptorPlugin.ts`.\n\nThe `load` hook is the file-read sink:\n\n```ts\nif (mock.type === 'redirect') {\n  return readFile(mock.redirect, 'utf-8')\n}\n```\n\n`mock.redirect` is derived from client input at registration time with no\nboundary check:\n\n```ts\nif (event.type === 'redirect') {\n  const redirectUrl = new URL(event.redirect)\n  event.redirect = join(server.config.root, redirectUrl.pathname)\n}\nregistry.register(event)\n```\n\nThere is no `server.fs.allow` / `server.fs.deny` check and no assertion that the\nresolved path stays within the project root.\n\n## Registration paths and trust boundaries\n- **Public `mockerPlugin` / `interceptorPlugin` (unauthenticated).** In\n  `configureServer`, the plugin registers `server.ws.on('vitest:interceptor:register', \u2026)`\n  on Vite's HMR WebSocket. That socket performs no token, Origin, or same-origin\n  check, so any client that can reach it can register a redirect mock. This is\n  the path the \"unauthenticated\" impact applies to.\n- **Vitest browser mode (authenticated).** Mocks register over the browser RPC\n  (`registerMock`), which sits behind a per-run token (`isValidApiRequest`, a\n  random `api.token`). The interceptor's `configureServer` socket is not used for\n  registration here (in v5 it does not run at all, as the plugin is injected per\n  environment). The same missing boundary check exists on the authenticated RPC\n  path, but reaching it requires the token, so it is not a remote-unauthenticated\n  read.\n\n## Path handling\n`new URL(redirect).pathname` combined with `join(root, pathname)` does **not**\nconfine reads to the root:\n\n- Special/hierarchical schemes (`file:`, `http:`) are normalized by WHATWG URL,\n  so `..` segments are collapsed and the result stays under the root. Payloads of\n  the form `file:///../../etc/passwd` do **not** escape.\n- A non-special (opaque) scheme preserves `..` in `pathname`, so\n  `join(root, \"../../\u2026/etc/passwd\")` resolves outside the root and reads an\n  arbitrary file.\n\nEven without escaping the root, the missing `server.fs` check allows reading any\nin-root file the dev server would otherwise refuse to serve (for example an\nin-root `.env` or source that is denied by `server.fs.deny`).\n\n## Scope / preconditions\n- This is a **development-server** issue. The dev server binds to `localhost` by\n  default and is not reachable from the network unless the developer exposes it\n  (`server.host` / `0.0.0.0`, a LAN bind, or a proxy).\n- A raw (non-browser) client against a reachable server bypasses browser origin\n  and CORS protections entirely and can both register the mock and read the\n  response.\n- A browser-based drive-by against a localhost server is substantially mitigated\n  by Vite defaults: the default CORS origin allowlist is limited to `localhost`\n  origins, and `server.allowedHosts` blocks DNS-rebinding, so a cross-origin page\n  cannot read the file contents back.\n\n## Impact\nDisclosure of local files readable by the dev-server process (source, in-root\n`.env`/secrets, and, via the opaque-scheme payload, files outside the project\nroot). No integrity or availability impact.\n\n## Affected versions\nPresent since `@vitest/mocker` was introduced.\n\n- **Affected: `@vitest/mocker` >= 2.1.0** (shipped in `vitest` and\n  `@vitest/browser` >= 2.1.0), through 4.1.x and the 5.0.0 pre-releases.\n- **Fixed:** Vitest 4.1.11 and 5.0.0. Older majors (2.1.x, 3.x) are not\n  maintained and are not planned to receive the fix.\n\n## Fix\nValidate the resolved redirect target against Vite's file-serving allowlist\n(`isFileLoadingAllowed`) before registering it, at every registration site, and\nstop registering the interceptor WebSocket events in Vitest's browser mode\n(mocks there flow through the authenticated RPC).",
+       "aliases": [
+        "CVE-2026-84373"
+       ],
+       "severity": [
+        {
+         "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+         "type": "CVSS_V3"
+        }
+       ],
+       "affected": [
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@vitest/mocker",
+          "purl": "pkg:npm/%40vitest/mocker"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "2.1.0"
+            },
+            {
+             "fixed": "4.1.11"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "vitest",
+          "purl": "pkg:npm/vitest"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "2.1.0"
+            },
+            {
+             "fixed": "4.1.11"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "vitest",
+          "purl": "pkg:npm/vitest"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "5.0.0-beta.1"
+            },
+            {
+             "fixed": "5.0.0-rc.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        },
+        {
+         "package": {
+          "ecosystem": "npm",
+          "name": "@vitest/mocker",
+          "purl": "pkg:npm/%40vitest/mocker"
+         },
+         "ranges": [
+          {
+           "events": [
+            {
+             "introduced": "5.0.0-beta.1"
+            },
+            {
+             "fixed": "5.0.0-rc.2"
+            }
+           ],
+           "type": "SEMVER"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "groups": [
+      {
+       "ids": [
+        "GHSA-82fw-gwwq-j7x9"
+       ],
+       "aliases": [
+        "CVE-2026-84373",
+        "GHSA-82fw-gwwq-j7x9"
+       ],
+       "max_severity": "5.9"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
