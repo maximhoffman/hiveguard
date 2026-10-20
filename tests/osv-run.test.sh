@@ -72,10 +72,10 @@ mk_fixture() {  # $1=out file, $2=extra fast-uri id ("" for none)
   cat > "$1" <<EOF
 {"results":[{"source":{"path":"$SRC","type":"lockfile"},"packages":[
  {"package":{"name":"fast-uri","version":"3.0.1","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
+  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"package":{"name":"fast-uri","ecosystem":"npm"},"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
   "groups":[{"ids":["GHSA-AAAA-0001","GHSA-AAAA-0002"$extra_ids],"max_severity":"7.5"}]},
  {"package":{"name":"lodash","version":"4.17.20","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
+  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
   "groups":[{"ids":["GHSA-BBBB-0001"],"max_severity":"9.1"}]}]}]}
 EOF
 }
@@ -135,10 +135,10 @@ check "active: root and anchors as the new entry" "same" \
 check "active: entry keys" "anchor,eco,fix,ids,pkg,project_anchor,root,sev,src,version" "$(jq -r '.active[0]|keys|join(",")' "$HIVEGUARD_RUN" 2>/dev/null)"
 
 # --- 2b. an ack shrinks active on the next scan --------------------------------
-cp "$HIVEGUARD_RUN" "$T/run-before-ack.json"; cp "$HIVEGUARD_STATE" "$T/state-before-ack.json"
+cp "$HIVEGUARD_RUN" "$T/run-prior.json"; cp "$HIVEGUARD_STATE" "$T/state-prior.json"
 "$HG/bin/hiveguard" ack "$SRC" fast-uri >/dev/null </dev/null; scan "$T/run2.json"
 check "active after acking fast-uri" "1 lodash" "$(J '(.active|length), .active[0].pkg')"
-rm -f "$HIVEGUARD_ACKS"; cp "$T/run-before-ack.json" "$HIVEGUARD_RUN"; cp "$T/state-before-ack.json" "$HIVEGUARD_STATE"
+rm -f "$HIVEGUARD_ACKS"; cp "$T/run-prior.json" "$HIVEGUARD_RUN"; cp "$T/state-prior.json" "$HIVEGUARD_STATE"
 
 # --- 3. carry-over while the report was never opened ------------------------
 scan "$T/run2.json"

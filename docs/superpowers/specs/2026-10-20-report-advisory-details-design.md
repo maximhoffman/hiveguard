@@ -150,7 +150,7 @@ renamed button) applies to that report too, since it is presentation only.
 JSON object `{id: text}` where `text` is the stored `details` with the truncation
 suffix already appended. JSON inside a `<script>` element: the serialised string has
 every `</` replaced by `<\/` (a text containing `</script>` must not end the element),
-and `<!--` by `<\!--`. The page's script reads it with `JSON.parse` once, lazily, on the
+and `<!--` by `\u003c!--` (both valid JSON escapes). The page's script reads it with `JSON.parse` once, lazily, on the
 first `toggle` of any details element, and sets the `<pre>`'s `textContent`.
 
 ### 1.6 Why not …
@@ -229,8 +229,10 @@ crates.io, Packagist, …), good for the forms OSV ranges actually carry (`5.0.0
   (`alpha < beta < pre < rc`, PEP's `a < b < rc`); a shorter tag that is a prefix of a
   longer one sorts first.
 - The key is `(release, rank, tokens)`; two versions compare by key. A version that
-  does not parse compares with nothing: no span contains it, and it is skipped by the
-  fallback and by the per-package maximum (a parsed fix always wins over an unparsed one).
+  does not parse compares with nothing: no span contains it. An unparsed *installed*
+  version gets the fallback's lowest parsed fix of the matching entries (better than
+  nothing for an odd version string); an unparsed *fix* is skipped by the fallback and
+  loses to any parsed fix in the per-package maximum.
 
 This replaces `vtuple` (the first four digit groups), which ordered `5.0.0-rc.2` above
 `4.1.11` and could not tell a pre-release from its release. Stated limits, accepted: no

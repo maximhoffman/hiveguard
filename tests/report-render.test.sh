@@ -18,15 +18,13 @@
 #   - refusals (scan in progress → 4, no render block / unknown block / no
 #     state → 3, flag combinations → 2), recreation of a deleted report with the
 #     state's mtime, the probe report untouched, timing, --help
-#   - the scan path stays byte-identical to the 9e5df56 renderer (links off and
-#     on) and the run file's key list is unchanged
+#   - the run file's key lists are unchanged
 #
 # Fully offline: osv-scanner is a stub on HIVEGUARD_TOOL_PATH that replays a
 # JSON fixture. Runs under an isolated HOME with every HIVEGUARD_* override set,
 # so the real ~/.hiveguard and the launchd label com.hiveguard.osv-daily are
 # never touched. "App running" is simulated by writing this shell's pid to
-# HIVEGUARD_APP_PID. Section I extracts the 9e5df56 renderer with `git archive`
-# from this checkout (read only).
+# HIVEGUARD_APP_PID.
 #
 # Usage: bash tests/report-render.test.sh
 set -uo pipefail          # deliberately not -e: a failed check must not abort
@@ -80,10 +78,10 @@ mk_fixture() {  # $1=out file, $2=extra fast-uri id ("" for none)
   cat > "$1" <<EOF
 {"results":[{"source":{"path":"$SRC","type":"lockfile"},"packages":[
  {"package":{"name":"fast-uri","version":"3.0.1","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
+  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"package":{"name":"fast-uri","ecosystem":"npm"},"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
   "groups":[{"ids":["GHSA-AAAA-0001","GHSA-AAAA-0002"$extra_ids],"max_severity":"7.5"}]},
  {"package":{"name":"lodash","version":"4.17.20","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
+  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
   "groups":[{"ids":["GHSA-BBBB-0001"],"max_severity":"9.1"}]}]}]}
 EOF
 }
@@ -127,10 +125,10 @@ mk_fixture_split() {  # $1=out: run1, but fast-uri's two ids in SEPARATE groups 
   cat > "$1" <<EOF
 {"results":[{"source":{"path":"$SRC","type":"lockfile"},"packages":[
  {"package":{"name":"fast-uri","version":"3.0.1","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}],
+  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"package":{"name":"fast-uri","ecosystem":"npm"},"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}],
   "groups":[{"ids":["GHSA-AAAA-0001"],"max_severity":"9.3"},{"ids":["GHSA-AAAA-0002"],"max_severity":"5.0"}]},
  {"package":{"name":"lodash","version":"4.17.20","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
+  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
   "groups":[{"ids":["GHSA-BBBB-0001"],"max_severity":"9.1"}]}]}]}
 EOF
 }
@@ -154,7 +152,8 @@ check "A: done line" "✅ report refreshed (scan of $STAMP_S): 4 active vulnerab
 
 # --- B. the render block ---
 check "B: state keys" "counts,findings,render,schema,stamp,target" "$(jq -r 'keys|join(",")' "$HIVEGUARD_STATE")"
-check "B: render block shape" "1 $T/proj 2 eco,fix,id_sev,ids,maxsev,new_ids,pkg,root,src,version" \
+check "B: render block keys" "advisories,packages,scan_targets,schema" "$(jq -r '.render|keys|join(",")' "$HIVEGUARD_STATE")"
+check "B: render block shape" "1 $T/proj 2 eco,fix,id_fix,id_sev,ids,maxsev,new_ids,pkg,root,src,version" \
   "$(jq -r '.render.schema, (.render.scan_targets|join(",")), (.render.packages|length), (.render.packages[0]|keys|join(","))' "$HIVEGUARD_STATE" | paste -sd' ' -)"
 check "B: fast-uri record" "fast-uri 3.0.1 npm 3.0.6 7.5 GHSA-AAAA-0001,GHSA-AAAA-0002,GHSA-AAAA-0003 GHSA-AAAA-0003 7.5 $T/proj/app" \
   "$(jq -r '.render.packages[0] | .pkg, .version, .eco, .fix, .maxsev, (.ids|join(",")), (.new_ids|join(",")), .id_sev["GHSA-AAAA-0003"], .root' "$HIVEGUARD_STATE" | paste -sd' ' -)"
@@ -202,13 +201,13 @@ diff <(norm "$T/scan.html") <(norm "$REPORT") >/dev/null; check "E: app off → 
 
 # --- F. per-id severity: a partial package ack re-rates the active fragment ---
 reset_scan; scan "$T/split.json"; scan "$T/split.json"
-check "F: CRIT 9.3 (card head + row) / markers 2 critical" "2 1" \
+check "F: CRIT 9.3 (card head + row + list badge) / markers 2 critical" "3 1" \
   "$(count 'CRIT 9.3') $(count '(2 critical)' "$HIVEGUARD_MARKERS")"
 printf '{"schema":2,"projects":{},"packages":{"%s":{"fast-uri":{"ids":["GHSA-AAAA-0001"],"since":"x"}}}}\n' "$SRC" > "$HIVEGUARD_ACKS"; A0="$(md5 -q "$HIVEGUARD_ACKS")"
 render
-check "F: MED 5.0 / mutedbadge / re-ack / critical tile" "1 1 1 1" \
-  "$(count 'MED 5.0') $(count 'class="mutedbadge"') $(count '>re-ack</button>') $(count '<div class="n">1</div><div class="l">critical</div>')"
-check "F: acked twin CRIT 9.3 (card head + row)" "2" \
+check "F: MED 5.0 (row + list badge) / mutedbadge / mute buttons / critical tile" "2 1 2 1" \
+  "$(count 'MED 5.0') $(count 'class="mutedbadge"') $(count '>mute</button>') $(count '<div class="n">1</div><div class="l">critical</div>')"
+check "F: acked twin CRIT 9.3 (card head + row + list badge)" "3" \
   "$(sed -n '/class="ackwrap"/,$p' "$REPORT" | grep -o 'CRIT 9.3' | wc -l | tr -d ' ')"
 check "F: markers 1 critical" "$T/proj/app${TAB}active${TAB}2 active vulnerabilities (1 critical)" "$(cat "$HIVEGUARD_MARKERS")"
 check "F: ack store untouched" "$A0" "$(md5 -q "$HIVEGUARD_ACKS")"
@@ -252,29 +251,7 @@ check "H: --help documents the mtime rule" "yes" "$([ "$("$HG/bin/osv-daily" --h
 check "H: no .tmp / scan pid / opened stamp" "0" \
   "$(ls -A "$HOME/.hiveguard" | grep -c '\.tmp$\|^osv-daily\.pid$\|^osv-report-opened$')"
 
-# --- I. the scan path is unchanged: identical to the 9e5df56 renderer (links off and on); run file keys ---
-links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"; cp "$REPORT" "$T/new.html"
-cp "$HIVEGUARD_RUN" "$T/new-run.json"; cp "$HIVEGUARD_STATE" "$T/new-state.json"
-mkdir -p "$T/base" && git -C "$HG" archive 9e5df56 bin 2>/dev/null | tar -x -C "$T/base" 2>/dev/null
-check "I: 9e5df56 renderer extracted" "yes" "$([ -x "$T/base/bin/osv-daily" ] && echo yes)"
-scan_base() { STUB_JSON="$1" "$T/base/bin/osv-daily" "$T/proj" >/dev/null 2>&1 </dev/null; }
-reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
-# card heads became "folder name + path" after 9e5df56 (section K); map them back,
-# everything else must stay byte-identical
-legacy_names() { sed -e 's#<span class="pname"><span class="pn">[^<]*</span><span class="pp">\([^<]*\)</span></span>#<span class="pname">\1</span>#g' \
-                     -e '/^\.pn{/d' -e '/^\.pp{/d' -e '/^\.lt{/d' -e 's#^\.pname{.*#.pname{flex:1;font-weight:600;word-break:break-word}#'; }
-diff <(norm "$T/new.html" | legacy_names) <(norm "$REPORT") >/dev/null; check "I: links off → identical to 9e5df56 (card heads aside)" "0" "$?"
-untimed='del(.started_epoch, .finished_epoch, .stamp)'
-check "I: run file content as 9e5df56's (times aside)" "$(jq -S "$untimed" "$HIVEGUARD_RUN")" "$(jq -S "$untimed" "$T/new-run.json")"
-check "I: state as 9e5df56's plus the render block (stamp aside)" "$(jq -S 'del(.stamp)' "$HIVEGUARD_STATE")" \
-  "$(jq -S 'del(.stamp, .render)' "$T/new-state.json")"
-links_on; strict_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"; cp "$REPORT" "$T/new-on.html"
-reset_scan; scan_base "$T/run1.json"; scan_base "$T/run2.json"
-# the links-on report gained the reload-on-return script (appended last) and the
-# leaving-row note's CSS lines after 9e5df56; everything else must be byte-identical
-strip_reload() { norm "$1" | legacy_names | grep -v 'hggone\|\.gone' | awk '{l[NR]=$0} /var K=.hiveguard-reload./{cut=NR-2} END{n=cut?cut-1:NR; for(i=1;i<=n;i++) print l[i]}'; }
-check "I: links on → the reload-on-return script is there" "1" "$(grep -c "var K='hiveguard-reload'" "$T/new-on.html")"
-diff <(strip_reload "$T/new-on.html") <(strip_reload "$REPORT") >/dev/null; check "I: links + strict on → identical to 9e5df56 (reload script aside)" "0" "$?"
+# --- I. the scan path: run file and state shape ---
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "I: run file keys" "active,counts,error,finished_epoch,new,ok,rc,roots,schema,stamp,started_epoch,target,unseen" \
   "$(jq -r 'keys|join(",")' "$HIVEGUARD_RUN")"

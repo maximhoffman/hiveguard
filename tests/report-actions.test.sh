@@ -9,7 +9,7 @@
 #     exact hrefs (percent-encoded with no safe characters, HTML-escaped), the
 #     terminal command tucked behind a small `copy` button, the CSS and footer
 #   - pause links (1 h / 2 h) only when strict mode is on, with the realpath'd root
-#   - a pierced (muted-badge) row gets a `re-ack` link; the Acknowledged section
+#   - a pierced (muted-badge) row gets a `mark as known` link; the Acknowledged section
 #     keeps its unmute buttons and never gets a link
 #   - --probe reports and a dead app pid never render links
 #   - anchors and the hash-jump script are intact with links on
@@ -75,10 +75,10 @@ mk_fixture() {  # $1=out file, $2=extra fast-uri id ("" for none)
   cat > "$1" <<EOF
 {"results":[{"source":{"path":"$SRC","type":"lockfile"},"packages":[
  {"package":{"name":"fast-uri","version":"3.0.1","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
+  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"package":{"name":"fast-uri","ecosystem":"npm"},"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
   "groups":[{"ids":["GHSA-AAAA-0001","GHSA-AAAA-0002"$extra_ids],"max_severity":"7.5"}]},
  {"package":{"name":"lodash","version":"4.17.20","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
+  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
   "groups":[{"ids":["GHSA-BBBB-0001"],"max_severity":"9.1"}]}]}]}
 EOF
 }
@@ -186,12 +186,12 @@ check "strict: root that is the scan target gets no pause link" "0 1" \
   "$(count 'hiveguard://pause') $(count '>mark project as known</a>')"
 strict_off
 
-# --- 4. pierced row → re-ack link; acked section untouched --------------------
+# --- 4. pierced row → mark-as-known link; acked section untouched --------------------
 reset_scan; scan "$T/run1.json"; "$HG/bin/hiveguard" ack "$SRC" fast-uri >/dev/null </dev/null; scan "$T/run2.json"
-check "pierced: re-ack link + package-form href" "1 1" \
-  "$(count '>re-ack</a>') $(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=fast-uri\"")"
-check "pierced: re-ack title" "1" \
-  "$(count "title=\"Fold the new advisory into this package's mute via the HiveGuard app (asks for confirmation)\"")"
+check "pierced: mark-as-known links (pierced + ordinary row) + package-form href" "2 1" \
+  "$(count '>mark as known</a>') $(count "href=\"hiveguard://ack?v=1&amp;src=$ENC&amp;pkg=fast-uri\"")"
+check "pierced: new-advisory title" "1" \
+  "$(count "title=\"A new advisory appeared in a package you had muted. Mark it as known too (asks for confirmation).\"")"
 check "pierced: muted badge kept" "1" "$(count 'class="mutedbadge"')"
 check "acked: unmute buttons kept" "1 1" "$(count '>unmute</button>') $(count '>unmute all</button>')"
 check "acked: no link in the Acknowledged section" "0" \
@@ -199,10 +199,10 @@ check "acked: no link in the Acknowledged section" "0" \
 check "acked: unmute buttons stay plain cp" "2" \
   "$(sed -n '/class="ackwrap"/,$p' "$REPORT" | grep -o 'class="cp"' | wc -l | tr -d ' ')"
 
-# project-level mute pierced → re-ack link in the project form
+# project-level mute pierced → mark-as-known link in the project form
 reset_scan; scan "$T/run1.json"; "$HG/bin/hiveguard" ack "$SRC" >/dev/null </dev/null; scan "$T/run2.json"
-check "pierced (project mute): re-ack ack-project link" "1 1" \
-  "$(count '>re-ack</a>') $(count "<a class=\"act-link\" href=\"hiveguard://ack-project?v=1&amp;src=$ENC\" title=\"Fold")"
+check "pierced (project mute): mark-as-known ack-project link (pierced row only: lodash is under the project mute)" "1 1" \
+  "$(count '>mark as known</a>') $(count "<a class=\"act-link\" href=\"hiveguard://ack-project?v=1&amp;src=$ENC\" title=\"A new advisory")"
 check "pierced (project mute): copy keeps the project command" "1" \
   "$(count "data-cmd=\"hiveguard ack $SRC\" title=\"Copy the terminal command instead\" aria-label=\"Copy command: hiveguard ack $SRC\">copy</button></span></td>")"
 

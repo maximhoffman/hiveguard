@@ -30,7 +30,18 @@
 # ~/.hiveguard/osv-acks.json) are excluded from the totals and the notification
 # for the advisories known at ack time, and shown in a collapsed "Acknowledged"
 # section. A genuinely NEW advisory in a muted item still surfaces and alerts
-# ("new pierces the mute"); re-run `hiveguard ack` to fold it in.
+# ("new pierces the mute"), badged "muted"; its button ("mark as known" with the
+# menu bar app, "mute" without) re-runs `hiveguard ack` to fold it in.
+#
+# Advisory details: each report row names its worst advisory (osv.dev link) and
+# describes it in one line; clicking the description lists every advisory of
+# the row with its CVE aliases, its own severity and fix, and the full text on a
+# further click (plain text, never HTML). The scan saves the texts once per
+# advisory under `render.advisories` of the state file, each description capped
+# at 4000 characters (cut at a word boundary, marked truncated), so --render
+# shows them too; a state saved before this has no texts and renders the plain
+# IDs column. "Fixed in" is the fix for the package on its own version line.
+# A severity of 0 or unknown reads "no score" and ranks after HIGH, before MED.
 # The scan also writes ~/.hiveguard/osv-last-scan.json (override: HIVEGUARD_STATE)
 # — the last scan's summary and the baseline for the "new since last scan" diff,
 # and, under `render`, the normalised findings the report is built from.
@@ -64,7 +75,8 @@
 #
 # Report action buttons: when the menu bar app is running at report time (the
 # same live-pid check as the notifier handoff) the Active section's buttons
-# become hiveguard:// links the app handles — "mark as known" (ack <src> <pkg>),
+# become hiveguard:// links the app handles — "mark as known" (ack <src> <pkg>,
+# or ack <src> on a row a project mute covered),
 # "mark project as known" (ack <src>) and, only with strict mode on and for a
 # root strict mode would block, "pause strict 1 h / 2 h" (strict pause). The
 # app always asks for confirmation; the terminal command stays behind a small
@@ -426,17 +438,154 @@ def finding_root(src):
         cur = parent
     return d0
 
-def vtuple(v):
-    return tuple(int(x) for x in re.findall(r'\d+', v or "")[:4]) or (0,)
+# --- versions and "Fixed in" ---------------------------------------------
+# vkey: one sort key for every ecosystem's version strings as OSV ranges carry
+# them. Strip one leading v/V and a +build suffix; release = the leading
+# \d+(\.\d+)* with trailing zeros removed (1.0 == 1.0.0); tag = the rest minus
+# one leading -/./_ : empty → the release (rank 1), "post…" → after it (rank 2),
+# anything else (rc.2, 0, beta3, a1, a Go pseudo-version's date) → before it
+# (rank 0). Equal ranks compare tag tokens (digit / letter runs): numbers
+# numerically and before letters, letters case-insensitively, a prefix first.
+# None when there is no leading digit — such a version compares with nothing.
+_VREL = re.compile(r'\d+(?:\.\d+)*')
+def vkey(v):
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    s = s.split("+", 1)[0]
+    m = _VREL.match(s)
+    if not m:
+        return None
+    rel = [int(x) for x in m.group(0).split(".")]
+    while rel and rel[-1] == 0:
+        rel.pop()
+    tag = s[m.end():]
+    if tag[:1] in ("-", ".", "_"):
+        tag = tag[1:]
+    rank = 1 if not tag else (2 if tag.lower().startswith("post") else 0)
+    toks = tuple((0, int(t)) if t.isdigit() else (1, t.lower())
+                 for t in re.findall(r'\d+|[A-Za-z]+', tag))
+    return (tuple(rel), rank, toks)
+
+def vcmp(a, b):
+    ka, kb = vkey(a), vkey(b)
+    if ka is None or kb is None:
+        return None
+    return (ka > kb) - (ka < kb)
+
+def _eco_norm(e):
+    return (e or "").split(":", 1)[0].strip().lower()
+
+def _name_norm(n, eco):
+    n = (n or "").lower()
+    return re.sub(r'[-_.]+', '-', n) if eco == "pypi" else n
+
+def pkg_match(aff, name, eco):
+    # an affected[] entry is a candidate iff its package is the scanned one:
+    # ecosystem before any ":" and name case-insensitive (PyPI: PEP 503 runs of
+    # -_. collapse to -). An entry without a package never matches.
+    pk = aff.get("package") if isinstance(aff, dict) else None
+    if not isinstance(pk, dict):
+        return False
+    e = _eco_norm(eco)
+    if _eco_norm(pk.get("ecosystem")) != e:
+        return False
+    return _name_norm(pk.get("name"), e) == _name_norm(name, e)
+
+def _spans(aff):
+    # (introduced, fixed | None, last_affected | None) per affected span of the
+    # entry's non-GIT ranges; a close event without an open span opens at "0".
+    out = []
+    for rng in aff.get("ranges") or []:
+        if not isinstance(rng, dict) or (rng.get("type") or "").upper() == "GIT":
+            continue
+        intro = None
+        for e in rng.get("events") or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("introduced") is not None:
+                if intro is None:
+                    intro = e["introduced"]
+            elif e.get("fixed") or e.get("last_affected"):
+                out.append((intro if intro is not None else "0",
+                            e.get("fixed") or None, e.get("last_affected") or None))
+                intro = None
+        if intro is not None:
+            out.append((intro, None, None))
+    return out
+
+def advisory_fix(vuln, name, eco, version):
+    # This advisory's fix for (name, eco, version): the `fixed` of the first span
+    # (of the matching package's entries) that contains the version; a containing
+    # span with no fix → no fix. No containing span → the lowest fix above the
+    # version among those spans. Never a value from another package's entry.
+    spans = []
+    for aff in (vuln.get("affected") or []) if isinstance(vuln, dict) else []:
+        if pkg_match(aff, name, eco):
+            spans.extend(_spans(aff))
+    kv = vkey(version)
+    if kv is not None:
+        for intro, fx, la in spans:
+            if intro != "0":
+                ki = vkey(intro)
+                if ki is None or ki > kv:
+                    continue
+            if fx is not None:
+                kf = vkey(fx)
+                if kf is None or not kv < kf:
+                    continue
+            if la is not None:
+                kl = vkey(la)
+                if kl is None or kv > kl:
+                    continue
+            return fx or ""
+    best = None
+    for _intro, fx, _la in spans:
+        kf = vkey(fx) if fx else None
+        if kf is None or (kv is not None and not kf > kv):
+            continue
+        if best is None or kf < best[0]:
+            best = (kf, fx)
+    return best[1] if best else ""
+
+def max_fix(fixes):
+    # the highest fix under vkey; an unparsed fix loses to any parsed one, and
+    # among only unparsed fixes the first is kept
+    best = ""
+    for f in fixes:
+        if not best:
+            best = f
+            continue
+        kb, kf = vkey(best), vkey(f)
+        if kf is not None and (kb is None or kf > kb):
+            best = f
+    return best
+
+# --- advisory texts (render.advisories) -------------------------------------
+DETAILS_CAP = 4000
+def adv_entry(v):
+    det = v.get("details") if isinstance(v.get("details"), str) else ""
+    truncated = len(det) > DETAILS_CAP
+    if truncated:
+        det = det[:DETAILS_CAP].rsplit(None, 1)[0]
+    al = v.get("aliases")
+    return {"summary": v.get("summary") if isinstance(v.get("summary"), str) else "",
+            "aliases": [a for a in al if isinstance(a, str)] if isinstance(al, list) else [],
+            "details": det, "truncated": truncated}
 
 # --- the per-package records the report is built from ----------------------
 # One record per vulnerable package, in scan iteration order (merged results
 # order; a src's packages contiguous): {src, root, pkg, version, eco, ids
 # (every advisory id, scanner order), id_sev (id → severity from the scanner's
-# groups, max when an id spans groups), maxsev (package max over groups), fix
-# (computed fixed-in version or ""), new_ids (ids absent from the previous
-# scan's baseline; [] when the baseline is not valid)}. A scan saves them in the
-# state's `render` block; --render reads them back instead of scanning.
+# groups, max when an id spans groups), maxsev (package max over groups),
+# id_fix (id → that advisory's fix for this package and version, only ids with
+# a fix), fix (the highest of id_fix, or ""), new_ids (ids absent from the
+# previous scan's baseline; [] when the baseline is not valid)}. A scan saves
+# them in the state's `render` block, with adv_table (advisory id → summary,
+# aliases, capped details) as `advisories`; --render reads both back instead of
+# scanning. adv_table is None for a state saved without it → legacy IDs column.
 if render:
     with open(os.environ["STATE"]) as f:
         saved = json.load(f)
@@ -446,6 +595,9 @@ if render:
               file=sys.stderr)
         sys.exit(3)
     records = blk["packages"]
+    adv_table = blk.get("advisories")
+    if not isinstance(adv_table, dict):
+        adv_table = None
     scan_targets = blk["scan_targets"]
     stamp, target = saved["stamp"], saved["target"]
     saved_resolved = saved["counts"]["resolved_vulns"]
@@ -475,6 +627,7 @@ else:
 
     records = []
     root_of = {}
+    adv_table = {}
     for r in d.get("results", []):
         src = r.get("source", {}).get("path", "")
         for p in r.get("packages", []):
@@ -492,13 +645,15 @@ else:
                 for gid in (g.get("ids") or []):
                     if gid not in id2sev or gs > id2sev[gid]:
                         id2sev[gid] = gs
-            fixes = []
+            id_fix = {}
             for v in vulns:
-                for af in v.get("affected", []) or []:
-                    for rng in af.get("ranges", []) or []:
-                        for e in rng.get("events", []) or []:
-                            if e.get("fixed"): fixes.append(e["fixed"])
-            fix = max(fixes, key=vtuple) if fixes else ""
+                vid = v.get("id", "")
+                if vid not in adv_table:
+                    adv_table[vid] = adv_entry(v)
+                fx = advisory_fix(v, name, info.get("ecosystem", ""), info.get("version", ""))
+                if fx and vid not in id_fix:
+                    id_fix[vid] = fx
+            fix = max_fix(list(id_fix.values()))
             if src not in root_of:
                 root_of[src] = finding_root(src)
             # advisory ids not present for this (src, pkg) in the previous scan
@@ -506,7 +661,7 @@ else:
             records.append({
                 "src": src, "root": root_of[src], "pkg": name,
                 "version": info.get("version", ""), "eco": info.get("ecosystem", ""),
-                "ids": ids, "id_sev": id2sev, "maxsev": maxsev, "fix": fix,
+                "ids": ids, "id_sev": id2sev, "maxsev": maxsev, "id_fix": id_fix, "fix": fix,
                 "new_ids": [i for i in ids if i not in base_ids] if baseline_valid else [],
             })
 
@@ -602,13 +757,38 @@ def backfill_open_ended(a, cur, path):
 if not render:   # scan-only: --render never rewrites the ack store
     backfill_open_ended(acks_raw, cur_findings, os.environ.get("ACKS", ""))
 
+# Severity: 0 / unknown is "no score" (the Go database publishes no CVSS), not
+# LOW. Ranks for ordering: CRIT 5, HIGH 4, no score 3, MED 2, LOW 1 — every
+# severity sort uses sev_key. Counts (critical = >= 9) stay on the raw score.
+def _sev_num(score):
+    try: return float(score)
+    except Exception: return 0.0
+
+def sev_rank(score):
+    s = _sev_num(score)
+    if s >= 9: return 5
+    if s >= 7: return 4
+    if s <= 0: return 3
+    if s >= 4: return 2
+    return 1
+
+def sev_key(score):
+    return (sev_rank(score), _sev_num(score))
+
 def sev_bucket(score):
-    try: s = float(score)
-    except: return ("low", "LOW")
+    s = _sev_num(score)
+    if s <= 0: return ("na", "no score")
     if s >= 9: return ("crit", "CRIT")
     if s >= 7: return ("high", "HIGH")
     if s >= 4: return ("med",  "MED")
     return ("low", "LOW")
+
+def sev_badge(score):
+    s = _sev_num(score)
+    if s <= 0:
+        return '<span class="sev na">no score</span>'
+    cls, lbl = sev_bucket(s)
+    return f'<span class="sev {cls}">{lbl} {s:.1f}</span>'
 
 # --- partition each vulnerable package into active / acknowledged fragments --
 # A package's advisories split into UNCOVERED (active) and COVERED (acked) ids.
@@ -616,7 +796,8 @@ def sev_bucket(score):
 # sections. Per-fragment severity = max over its ids (id→severity from the
 # osv-scanner groups, falling back to the package max). new_ids apply to the
 # active fragment only; an active fragment of an otherwise-muted package is a
-# "pierced" fragment (rendered with a muted badge + a re-ack button).
+# "pierced" fragment (rendered with a muted badge; its button folds the new
+# advisory into the mute).
 active, acked = [], []
 by_src = []   # [(src, root, [records])] — a src's records are contiguous
 for rec in records:
@@ -630,6 +811,8 @@ for src, root, recs in by_src:
         def frag_sev(frag_ids, _m=rec["maxsev"], _s=rec["id_sev"]):
             return max((_s.get(i, _m) for i in frag_ids), default=0.0)
         fix, eco, version = rec["fix"], rec["eco"], rec["version"]
+        adv = {"id_sev": rec["id_sev"], "maxsev": rec["maxsev"],
+               "id_fix": rec.get("id_fix") or {}}
         covered   = [i for i in ids if id_suppressed(src, name, i)]
         uncovered = [i for i in ids if not id_suppressed(src, name, i)]
         muted = is_muted(src, name)
@@ -638,25 +821,29 @@ for src, root, recs in by_src:
                 "name": name, "version": version, "eco": eco, "fix": fix,
                 "sev": frag_sev(uncovered), "count": len(uncovered), "ids": uncovered,
                 "new_ids": [i for i in uncovered if i in rec["new_ids"]],
-                "muted": muted,                       # pierced a mute → muted badge + re-ack
-                "reack_project": src in project_ack,  # re-ack form: project vs package
+                "muted": muted,                       # pierced a mute → muted badge
+                "reack_project": src in project_ack,  # its ack form: project vs package
+                **adv,
             })
         if covered:
             ack_pkgs.append({
                 "name": name, "version": version, "eco": eco, "fix": fix,
                 "sev": frag_sev(covered), "count": len(covered), "ids": covered,
                 "new_ids": [],
+                **adv,
             })
+    # a project's maxsev is its top row's severity (rank first: a card of
+    # "no score" + MED is headed "no score")
     if act_pkgs:
-        act_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        act_pkgs.sort(key=lambda x: sev_key(x["sev"]), reverse=True)
         active.append({"src": src, "root": root, "pkgs": act_pkgs,
-                       "maxsev": max(p["sev"] for p in act_pkgs)})
+                       "maxsev": act_pkgs[0]["sev"]})
     if ack_pkgs:
-        ack_pkgs.sort(key=lambda x: x["sev"], reverse=True)
+        ack_pkgs.sort(key=lambda x: sev_key(x["sev"]), reverse=True)
         acked.append({"src": src, "root": root, "pkgs": ack_pkgs,
-                      "maxsev": max(p["sev"] for p in ack_pkgs), "whole": src in project_ack})
-active.sort(key=lambda x: x["maxsev"], reverse=True)
-acked.sort(key=lambda x: x["maxsev"], reverse=True)
+                      "maxsev": ack_pkgs[0]["sev"], "whole": src in project_ack})
+active.sort(key=lambda x: sev_key(x["maxsev"]), reverse=True)
+acked.sort(key=lambda x: sev_key(x["maxsev"]), reverse=True)
 
 # A partially-muted package appears once per section (an active fragment AND
 # an acked fragment for the same (src, pkg)) — same for a project whose
@@ -755,7 +942,8 @@ if sf and not render:
             "new_vulns": new_vulns, "resolved_vulns": resolved_vulns,
         },
         "findings": cur_findings,
-        "render": {"schema": 1, "scan_targets": scan_targets, "packages": records},
+        "render": {"schema": 1, "scan_targets": scan_targets, "packages": records,
+                   "advisories": adv_table},
     }
     os.makedirs(os.path.dirname(sf) or ".", exist_ok=True)
     tmp = sf + ".tmp"
@@ -808,8 +996,52 @@ def cp_alt(cmd):
     return (f'<button class="cp cp-alt" type="button" data-cmd="{c}" '
             f'title="Copy the terminal command instead" aria-label="Copy command: {c}">copy</button>')
 
+def desc_of(vid):
+    # one-line description: the summary, else the first sentence of the details
+    # (to the first ". ", ".\n" or newline, at most 160 characters)
+    a = (adv_table or {}).get(vid) or {}
+    s = (a.get("summary") or "").strip()
+    if s:
+        return s
+    d = (a.get("details") or "").strip()
+    if d:
+        cut = len(d)
+        for sep, keep in ((". ", 1), (".\n", 1), ("\n", 0)):
+            k = d.find(sep)
+            if k != -1:
+                cut = min(cut, k + keep)
+        return d[:cut][:160].rstrip()
+    return "no description"
+
+def adv_cells(p, fid, new_ids):
+    # new layout: the Advisory cell (lead id + description toggle) and the
+    # hidden list row with one <li> per id, both in lead order
+    order = sorted(p["ids"], key=lambda i: sev_key(p["id_sev"].get(i, p["maxsev"])), reverse=True)
+    def link(i):
+        return (f'<a class="{"new" if i in new_ids else ""}" '
+                f'href="https://osv.dev/{html.escape(i)}" target="_blank" rel="noopener">{html.escape(i)}</a>')
+    lead = order[0]
+    desc = html.escape(desc_of(lead))
+    more = f'<span class="more">+{len(order)-1} more</span>' if len(order) > 1 else ""
+    cell = (f'<td class="ids">{link(lead)} <button class="advt" type="button" aria-expanded="false" '
+            f'aria-controls="a-{fid}" title="{desc}"><span class="advs">{desc}</span>{more}</button></td>')
+    lis = []
+    for i in order:
+        a = adv_table.get(i) or {}
+        aliases = "".join(f'<span class="alias">{html.escape(x)}</span>'
+                          for x in (a.get("aliases") or []) if x.startswith("CVE-"))
+        nb = '<span class="newbadge">NEW</span>' if i in new_ids else ""
+        fx = p["id_fix"].get(i)
+        afix = f'<span class="afix">fixed in {html.escape(fx)}</span>' if fx else ""
+        lis.append(f'<li>{link(i)}{aliases}{sev_badge(p["id_sev"].get(i, p["maxsev"]))}{nb}'
+                   f'<span class="sum">{html.escape(desc_of(i))}</span>{afix}'
+                   f'<details class="advd"><summary>details</summary>'
+                   f'<pre class="advtext" data-adv="{html.escape(i)}"></pre></details></li>')
+    row = (f'<tr class="adv" id="a-{fid}" hidden><td colspan="6"><ul class="advl">'
+           f'{"".join(lis)}</ul></td></tr>')
+    return cell, row
+
 def pkg_row(p, src, section):
-    cls, lbl = sev_bucket(p["sev"])
     active_sec = section == "active"
     pierced = active_sec and p.get("muted")   # active fragment of a muted package
     # NEW badge + accented links apply to active rows only (matches the tile count)
@@ -825,22 +1057,22 @@ def pkg_row(p, src, section):
     if section == "acked":
         cmd, label = "hiveguard ack --remove " + shlex.quote(src) + " " + shlex.quote(p["name"]), "unmute"
     elif pierced:
-        # re-ack folds the pierced advisory back into the existing mute; use the
-        # project form when the coverage came from a whole-project mute.
+        # the same ack again folds the pierced advisory into the existing mute;
+        # use the project form when the coverage came from a whole-project mute.
         if p.get("reack_project"):
-            cmd, label = "hiveguard ack " + shlex.quote(src), "re-ack"
+            cmd, label = "hiveguard ack " + shlex.quote(src), "mute"
         else:
-            cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "re-ack"
+            cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute"
     else:
         cmd, label = "hiveguard ack " + shlex.quote(src) + " " + shlex.quote(p["name"]), "mute"
     if links_on and active_sec:
         if pierced:
-            title = ("Fold the new advisory into this package's mute via the HiveGuard app "
-                     "(asks for confirmation)")
+            title = ("A new advisory appeared in a package you had muted. "
+                     "Mark it as known too (asks for confirmation).")
             if p.get("reack_project"):
-                link = app_link("ack-project", [("src", src)], "re-ack", title)
+                link = app_link("ack-project", [("src", src)], "mark as known", title)
             else:
-                link = app_link("ack", [("src", src), ("pkg", p["name"])], "re-ack", title)
+                link = app_link("ack", [("src", src), ("pkg", p["name"])], "mark as known", title)
         else:
             link = app_link("ack", [("src", src), ("pkg", p["name"])], "mark as known",
                             "Mark this finding as known via the HiveGuard app (asks for confirmation)")
@@ -851,19 +1083,23 @@ def pkg_row(p, src, section):
     # file's "anchor". When this (src, pkg) also has an active-section row
     # (partial mute), the active row wins the plain id and this acked twin
     # gets suffix "-k" so the two <tr> elements don't share a DOM id.
+    # The list row a-<fid> follows the same rule.
     fid = "f-" + h12(src + "\0" + p["name"])
     if section == "acked" and (src, p["name"]) in active_pkg_keys:
         fid += "-k"
+    if adv_table is None:   # legacy layout (state saved without advisories)
+        idcell, advrow = f'<td class="ids">{idlinks}{more}</td>', ""
+    else:
+        idcell, advrow = adv_cells(p, fid, new_ids)
     return (f'<tr id="{fid}"><td class="pk">{html.escape(p["name"])}<span class="eco">{html.escape(p["eco"])}</span></td>'
             f'<td class="mono">{html.escape(p["version"])}</td>'
-            f'<td><span class="sev {cls}">{lbl} {p["sev"]:.1f}</span>{badge}</td>'
+            f'<td>{sev_badge(p["sev"])}{badge}</td>'
             f'<td class="mono fix">{fix}</td>'
-            f'<td class="ids">{idlinks}{more}</td>'
-            f'<td class="act">{btn}</td></tr>')
+            f'{idcell}'
+            f'<td class="act">{btn}</td></tr>{advrow}')
 
 def proj_card(pr, muted):
     rows = "".join(pkg_row(p, pr["src"], "acked" if muted else "active") for p in pr["pkgs"])
-    pcls, plbl = sev_bucket(pr["maxsev"])
     if muted:
         head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
         whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
@@ -896,11 +1132,11 @@ def proj_card(pr, muted):
         pid += "-k"
     return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
             f'<span class="chev">▶</span>{sel}'
-            f'<span class="sev {pcls}">{plbl} {pr["maxsev"]:.1f}</span>'
+            f'{sev_badge(pr["maxsev"])}'
             f'<span class="pname"><span class="pn">{proj_name(pr["src"])}</span><span class="pp">{short(pr["src"])}</span></span>{whole}'
             f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
             f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
-            f'<th>Max severity</th><th>Fixed in</th><th>IDs</th><th class="acth">{last}</th></tr></thead>'
+            f'<th>Max severity</th><th>Fixed in</th><th>{"IDs" if adv_table is None else "Advisory"}</th><th class="acth">{last}</th></tr></thead>'
             f'<tbody>{rows}</tbody></table></div></details>')
 
 for _s in {pr["src"] for pr in active + acked}:
@@ -1013,6 +1249,18 @@ footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before c
                "“copy” gives the terminal command instead." if links_on else
                "Mute an old project with the “mute” button (→ hiveguard ack).")
 
+# the advisories' full texts, once, as JSON in the page (new layout only); the
+# script copies one into its <details> via textContent on first open. "</" is
+# written "<\/" and "<!--" as "\u003c!--" (both valid JSON escapes, so the
+# table still parses) and no text can end or confuse the <script> element.
+advdb_html = ""
+if adv_table is not None:
+    _db = {i: (a.get("details") or "") + ("… (truncated — full text on osv.dev)" if a.get("truncated") else "")
+           for i, a in adv_table.items()}
+    advdb_html = ('<script type="application/json" id="advdb">'
+                  + json.dumps(_db, ensure_ascii=False).replace("</", "<\\/").replace("<!--", "\\u003c!--")
+                  + '</script>\n')
+
 vuln_l = "vulnerabilities" + (f' · +{k_vuln} muted' if k_vuln else '')
 lede_extra = (' Muted projects/findings are excluded — see <b>Acknowledged</b> at the bottom.'
               if acked else '')
@@ -1084,7 +1332,18 @@ tr:last-child td{{border-bottom:none}}
 .sev{{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}}
 .sev.crit{{background:var(--crit-s);color:var(--crit)}}.sev.high{{background:var(--high-s);color:var(--high)}}
 .sev.med{{background:var(--med-s);color:var(--med)}}.sev.low{{background:var(--low-s);color:var(--low)}}
+.sev.na{{background:var(--surface-2);color:var(--muted)}}
 .ids{{font-family:var(--mono);font-size:11.5px}}.ids a{{color:var(--accent);text-decoration:none;margin-right:6px}}.ids a:hover{{text-decoration:underline}}.ids a.new{{font-weight:700;text-decoration:underline;text-underline-offset:2px}}.more{{color:var(--faint)}}
+.advt{{font:inherit;color:var(--text);background:none;border:none;padding:0;margin:0;text-align:left;cursor:pointer;display:inline-flex;align-items:baseline;vertical-align:bottom;max-width:34ch;white-space:nowrap}}.advt:hover .advs{{color:var(--accent)}}.advs{{min-width:0;overflow:hidden;text-overflow:ellipsis}}.advt .more{{flex:none;color:var(--faint);margin-left:6px}}
+tr.adv[hidden]{{display:none}}
+tr.adv>td{{background:var(--surface-2);padding:6px 12px 8px 28px}}
+.advl{{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:11.5px}}
+.advl li{{padding:4px 0;display:flex;flex-wrap:wrap;align-items:center;gap:6px}}
+.advl a{{color:var(--accent);text-decoration:none}}.advl a:hover{{text-decoration:underline}}.advl a.new{{font-weight:700;text-decoration:underline;text-underline-offset:2px}}.advl .newbadge{{margin-left:0}}
+.alias{{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px;white-space:nowrap}}
+.sum{{color:var(--muted)}}.afix{{color:var(--low)}}
+.advd summary{{cursor:pointer;color:var(--accent);font-size:11px}}
+.advtext{{white-space:pre-wrap;font-family:var(--sans);font-size:12.5px;color:var(--text);margin:6px 0 2px;max-width:72ch}}
 .clean{{color:var(--low);font-size:16px;margin-top:30px}}
 .ackwrap{{margin-top:30px}}
 .ackwrap>summary{{cursor:pointer;list-style:none;font-family:var(--mono);font-size:13px;color:var(--muted);border-top:1px dashed var(--border-strong);padding-top:16px}}
@@ -1112,7 +1371,7 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
 {acked_html}
 <footer>osv-daily · one scan -> report + notification. {footer_hint} Apply fixes yourself: bump the dependency to "Fixed in".{f'<br>{resolved_vulns} finding(s) resolved since last scan' if resolved_vulns > 0 else ''}</footer>
 </div>
-<script>
+{advdb_html}<script>
 (function(){{
   var b=document.getElementById('toggleAll');
   if(b){{
@@ -1197,6 +1456,21 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
   }}
   window.addEventListener('load',openAnchor);
   window.addEventListener('hashchange',openAnchor);
+  document.addEventListener('click',function(e){{
+    var b=e.target.closest('button.advt'); if(!b) return;
+    e.preventDefault(); e.stopPropagation();
+    var r=document.getElementById(b.getAttribute('aria-controls')); if(!r) return;
+    var show=r.hasAttribute('hidden');
+    if(show) r.removeAttribute('hidden'); else r.setAttribute('hidden','');
+    b.setAttribute('aria-expanded',show?'true':'false');
+  }});
+  var advdb=null;
+  document.addEventListener('toggle',function(e){{
+    var d=e.target; if(!d.classList||!d.classList.contains('advd')||!d.open) return;
+    var pre=d.querySelector('pre.advtext'); if(!pre||pre.textContent) return;
+    if(advdb===null){{ try{{ advdb=JSON.parse(document.getElementById('advdb').textContent); }}catch(err){{ advdb={{}}; }} }}
+    pre.textContent=advdb[pre.getAttribute('data-adv')]||'(see osv.dev)';
+  }},true);
   sync();
 }})();
 </script>{links_js}'''

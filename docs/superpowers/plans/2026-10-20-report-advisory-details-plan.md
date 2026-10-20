@@ -107,7 +107,7 @@ for the acked twin), `NEWCLS` = `new` iff the lead is in the fragment's `new_ids
 (active section), else empty — same `class="…"` attribute form as today's id links:
 
 ```
-<td class="ids"><a class="NEWCLS" href="https://osv.dev/LEAD" target="_blank" rel="noopener">LEAD</a> <button class="advt" type="button" aria-expanded="false" aria-controls="a-FID" title="DESC">DESC<span class="more">+K more</span></button></td>
+<td class="ids"><a class="NEWCLS" href="https://osv.dev/LEAD" target="_blank" rel="noopener">LEAD</a> <button class="advt" type="button" aria-expanded="false" aria-controls="a-FID" title="DESC"><span class="advs">DESC</span><span class="more">+K more</span></button></td>
 ```
 
 `<span class="more">+K more</span>` only when N > 1, with K = N − 1. Column header
@@ -139,7 +139,8 @@ the new layout; absent in the legacy layout):
 
 `DETAILS` = stored `details` + (`… (truncated — full text on osv.dev)` when
 `truncated`). Serialised with `json.dumps(table, ensure_ascii=False)`, then
-`.replace("</", "<\\/").replace("<!--", "<\\!--")`.
+`.replace("</", "<\\/").replace("<!--", "\\u003c!--")` (both are valid JSON string
+escapes; `<\!--` would not be).
 
 Script additions (inside the existing main script's IIFE, before `sync();`):
 
@@ -166,8 +167,8 @@ mono small type, `--faint` / `--muted`, chips like `.whole`):
 
 ```
 .sev.na{background:var(--surface-2);color:var(--muted)}
-.advt  — the toggle: unstyled button look (no border/background), inherits .ids font, color var(--text); max-width:34ch; one line, overflow hidden, text-overflow ellipsis; cursor pointer; hover → color var(--accent)
-.advt .more — faint, margin-left 6px
+.advt  — the toggle: unstyled button look (no border/background), inherits .ids font, inline-flex, max-width:34ch, nowrap; .advs (the description) min-width:0, overflow hidden, text-overflow ellipsis — so the "+K more" suffix is never clipped; hover → .advs color var(--accent)
+.advt .more — flex:none, faint, margin-left 6px
 tr.adv[hidden]{display:none}
 tr.adv>td{background:var(--surface-2);padding:6px 12px 8px 28px}
 .advl{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:11.5px}

@@ -66,10 +66,10 @@ mk_fixture() {  # $1=out file, $2=extra fast-uri id ("" for none)
   cat > "$1" <<EOF
 {"results":[{"source":{"path":"$SRC","type":"lockfile"},"packages":[
  {"package":{"name":"fast-uri","version":"3.0.1","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
+  "vulnerabilities":[{"id":"GHSA-AAAA-0001","affected":[{"package":{"name":"fast-uri","ecosystem":"npm"},"ranges":[{"events":[{"introduced":"0"},{"fixed":"3.0.6"}]}]}]},{"id":"GHSA-AAAA-0002","affected":[]}$extra],
   "groups":[{"ids":["GHSA-AAAA-0001","GHSA-AAAA-0002"$extra_ids],"max_severity":"7.5"}]},
  {"package":{"name":"lodash","version":"4.17.20","ecosystem":"npm"},
-  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
+  "vulnerabilities":[{"id":"GHSA-BBBB-0001","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"events":[{"fixed":"4.17.21"}]}]}]}],
   "groups":[{"ids":["GHSA-BBBB-0001"],"max_severity":"9.1"}]}]}]}
 EOF
 }
