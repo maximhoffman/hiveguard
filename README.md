@@ -44,7 +44,7 @@ Blind spot for **both**: a true zero-day not yet in any database.
 | `hiveguard daily <folder>…` | The scan behind the daily report: one pass over the folders you name → compact HTML report + macOS notification on findings. Compares against the previous scan to flag what's **new**. |
 | `hiveguard schedule on\|off\|status` | Schedule the daily scan — you pick the time and folders. Catches up on the next wake/startup if the Mac was asleep. Not automatic; you turn it on. |
 | `hiveguard brew` | Before `brew upgrade`: one HTML page of changelogs for outdated formulae — **major** jumps highlighted, each formula with a one-line description and a copy-ready `brew upgrade` command. Changelogs are cached so re-runs skip the network. |
-| `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you re-ack. Muted items move to a collapsed "Acknowledged" section — never dropped. |
+| `hiveguard ack <path> [pkg]` | Mute an old project (or a single finding) so it stops counting toward the report totals and the daily alert — **except** a genuinely new advisory, which still surfaces and still alerts until you mark it as known again. Muted items move to a collapsed "Acknowledged" section — never dropped. |
 | `hiveguard mark status\|on\|off\|clear\|hook` | Mark flagged project folders (Finder tag + terminal reminder). `off`/`clear` opt out; `hook` prints the line to add to `~/.zshrc`. |
 | `hiveguard strict on\|off\|status\|pause\|resume` | **Strict mode** (off by default): a project the daily scan flagged red refuses to run, build, test or install until you fix it or pause it (one project, one hour by default). Terminal-level guard only — it can't stop an IDE Run button, a double-click, Docker Desktop, or a process already running. |
 | `hiveguard doctor [--fix]` | Diagnose install/migration health (install method, PATH shadowing, obsolete `~/bin` links, the launchd agent, the shell guard, prerequisites). `--fix` applies only safe, reversible repairs. |
@@ -312,7 +312,15 @@ running, `daily` skips its own notification — the app owns notifications and r
 same run outcome via `hiveguard status --json`.
 
 The report groups findings by project, sorted by severity, with the fixed-in version and
-osv.dev links for every advisory (theme-aware — adapts to light/dark):
+osv.dev links for every advisory (theme-aware — adapts to light/dark). The **Advisory**
+column names the worst advisory of each package in words (for example *HTTP/2 server
+memory exhaustion due to Trailer headers in net/http*) and expands to the full list:
+every advisory with its CVE aliases, its own severity and fix, and its description on a
+further click. **Fixed in** is the fix for the version line you actually have installed
+(`golang.org/x/net 0.57.0` → `0.60.0`, `nanoid 3.3.16` → `3.3.18`), not the newest fix
+anywhere. An advisory the database gives no score shows **no score** and ranks after
+HIGH. Descriptions appear once a scan by this version has run; until then `--render`
+shows the older IDs column.
 
 ![osv-daily report — vulnerabilities grouped by project and sorted by severity, each with max severity, fixed-in version, and links to osv.dev](docs/screenshots/osv-daily.png)
 
@@ -374,8 +382,9 @@ hiveguard ack --clear                                       # drop every acknowl
 at the time you ack** — not the project or package forever. A genuinely **new** advisory
 that later appears in a muted project or package **still surfaces** (badged `muted` in
 the Active section) and **still fires the notification** — *new pierces the mute*. To
-accept it too, run the same `hiveguard ack …` again (or click the report's **re-ack**
-button), which folds the new advisory into the mute and goes quiet again.
+accept it too, run the same `hiveguard ack …` again (or click the row's **mark as
+known** button when the menu bar app is running, **mute** otherwise — the row keeps its
+`muted` badge so you can tell it apart), which folds the new advisory into the mute and goes quiet again.
 
 **Worked example:**
 
@@ -385,8 +394,9 @@ hiveguard ack ~/Projects/old-app/package-lock.json lodash
 ```
 
 Later, a new advisory for `lodash` lands. On the next scan it appears in the **Active**
-section badged `muted`, and the daily alert fires. Click **re-ack** on that row (it
-copies the same `hiveguard ack …` command) — run it, and the project is quiet again,
+section badged `muted`, and the daily alert fires. Click **mark as known** on that row
+(with the menu bar app running; without it the button reads **mute** and copies the same
+`hiveguard ack …` command) — confirm or run it, and the project is quiet again,
 now with the new advisory folded in.
 
 Acknowledgements made **before** this advisory-scoped behavior existed are

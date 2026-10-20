@@ -6,6 +6,29 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Advisory descriptions in the report.** The IDs column is now **Advisory**: it shows
+  the worst advisory's id with a one-line description, and expands to every advisory of
+  the package with its CVE aliases, its own severity, its own fix and its summary; the
+  full text opens on a further click (plain text). The texts are stored once per
+  advisory in `osv-last-scan.json` under `render.advisories` (each capped at 4 000
+  characters). Descriptions appear once a scan by this version has run; until then
+  `hiveguard daily --render` shows the previous IDs column.
+
+### Fixed
+- **"Fixed in" is the fix for the package on its own version line.** It used to be the
+  highest fix named by the advisories for any package or line: `1.27.2` for
+  `golang.org/x/net 0.57.0`, `5.0.0-rc.2` for vitest 3.2.7, `5.1.6` for nanoid 3.3.16.
+  It is now `0.60.0`, `4.1.11` and `3.3.18`. The same value reaches `osv-run.json` and
+  `hiveguard status --json`.
+- **Unknown severity reads `no score`** instead of `LOW 0.0`, and ranks after HIGH
+  rather than last. The critical count is unchanged.
+
+### Changed
+- The button on a muted row that a new advisory pierced reads **mark as known** (with
+  the menu bar app) or **mute** (without), like every other row, instead of `re-ack`.
+  The row keeps its `muted` badge.
+
 ## [1.7.0] - 2026-10-14
 
 Report actions through the companion menu bar app, and a report that updates the
