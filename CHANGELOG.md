@@ -6,6 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-21
+
+### Fixed
+- `hiveguard status --json` orders `attention[]` and `active[]` like the report: an
+  unscored finding (`sev` 0, "no score") after HIGH and before MED, not last. The lists
+  of `osv-run.json` (`new`, `unseen`, `active`) follow the same order. Fields and schema
+  unchanged (`docs/status-json.md`).
+
 ## [1.8.0] - 2026-10-21
 
 The report says what each advisory is, names the right fix, and stops calling an
