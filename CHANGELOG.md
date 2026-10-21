@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Strict mode is target-aware.** The gate used to judge only the directory a command
+  was typed in, so `cd /tmp && python ~/Projects/app/tools/x.py` or
+  `cd /tmp && pip install --upgrade certifi` with the project's venv active went through.
+  It now also refuses when the command *points into* a red project: an argument that is
+  an existing path inside it (`--opt=path` and `~/` forms included), a binary that lives
+  in it (an activated `.venv/bin`, `node_modules/.bin` on `PATH`), or its activated
+  environment (`VIRTUAL_ENV`, `CONDA_PREFIX`). Each location is judged by the same
+  innermost-root rule; a pause for the target project releases it. Targets are compared
+  against markers only — they never start a background scan.
+
+### Changed
+- The refusal message: a `because:` line names the argument, binary or environment that
+  triggered a target refusal; the `proceed:` line quotes the project path
+  (`hiveguard strict pause "/…/app"`) so it is right from any directory; and a closing
+  `agents:` entry tells AI coding agents not to work around the block (no cd elsewhere,
+  no copying files out, no other path, interpreter or environment) and to report it to
+  the user or ask them to pause.
+
 ## [1.8.3] - 2026-10-21
 
 ### Fixed

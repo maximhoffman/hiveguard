@@ -135,7 +135,7 @@ environment`); the fix is `deactivate`, the pause, or working in one project at 
 
 ### 1.5 Message: the agent line and the reason line
 
-The agent-directed text is a labelled `agents:` entry, last, two lines, present on
+The agent-directed text is a labelled `agents:` entry, last, three lines (label + two continuations), present on
 **every** refusal (cwd or target). A `because:` line is inserted right after the headline
 on a **target** refusal only (a cwd refusal needs no explanation — the headline already
 names the directory you are in). The `proceed:` line now carries the quoted root
@@ -171,7 +171,7 @@ already running; an alias defined after the hook. It is a discipline tool, not a
 a backtick. Line 1 is coloured red when stderr is a tty (as today); nothing else is.
 Everything goes to stderr via `print -u2 -r --`. Exit code 77.
 
-cwd refusal (5 lines):
+cwd refusal (6 lines):
 
 ```
 ⛔ hiveguard strict: SUMMARY in ROOT — refusing to run `CMD`.
@@ -182,7 +182,7 @@ cwd refusal (5 lines):
              to run `hiveguard strict pause`.
 ```
 
-target refusal (6 lines): the same with one line inserted after line 1:
+target refusal (7 lines): the same with one line inserted after line 1:
 
 ```
    because:  REASON
@@ -315,7 +315,7 @@ Do:
    debounce, the one permitted fork) byte-for-byte in behaviour.
 2. Resolution rules §1.2–§1.4 exactly (candidates incl. post-`=`, `-*` skip, `~`/`~/`,
    `:A`, `[[ -e ]]`; `${commands[$cmd]:h:A}` then `:A`; `VIRTUAL_ENV` then `CONDA_PREFIX`).
-3. Message §2.1 byte-for-byte, including the quoted root in `proceed:` and the two-line
+3. Message §2.1 byte-for-byte, including the quoted root in `proceed:` and the three-line
    `agents:` entry on every refusal; `because:` only on a target refusal. Keep the
    backtick as `$_HIVEGUARD_STRICT_BQ` (the file must still contain nothing that looks
    like a command substitution).
@@ -338,10 +338,10 @@ Owns: `tests/strict-hook.test.zsh` (only).
 Add the scaffold of §2.4 and these sections (names as given; `A`=`$T/proj/app`):
 
 - **N. Message.** cwd refusal in `A/sub` with `npm install left-pad`: `$ZERR` **equals**
-  the 5-line §2.1 text with `SUMMARY`=`12 active vulnerabilities (2 critical)`,
+  the 6-line §2.1 text with `SUMMARY`=`12 active vulnerabilities (2 critical)`,
   `ROOT`=`A`, `CMD`=`npm` (exact `is`, after stripping nothing — no colour because stderr
   is a file). Target refusal from `$T/tmp` with `python A/tools/x.py`: `$ZERR` equals the
-  6-line text with `because:  the argument A/tools/x.py points into that project (A/tools/x.py)`
+  7-line text with `because:  the argument A/tools/x.py points into that project (A/tools/x.py)`
   and `CMD`=`python`; stdout `rc=77`, no `REAL python`.
 - **O. Argument targets** (cwd `$T/tmp`, all → `rc=77`, stub never runs, `because:` as
   stated):
@@ -413,9 +413,9 @@ README (section "Strict mode", ≈ lines 463–541, and "Limitations" ≈ lines 
    > see paths hardcoded inside a script, an absolute path to a binary, `sudo`, an IDE
    > Run button, a double-click, Docker Desktop, or a process that's already running.
 
-2. Replace the sample refusal block with the 5-line cwd text of §2.1
+2. Replace the sample refusal block with the 6-line cwd text of §2.1
    (`SUMMARY`=`12 active vulnerabilities (2 critical)`, `ROOT`=`/Users/mh/Projects/app`,
-   `CMD`=`npm`), then add one sentence and the 6-line target sample:
+   `CMD`=`npm`), then add one sentence and the 7-line target sample:
 
    > When the block comes from where the command *points* rather than where it is
    > typed, a `because:` line says which argument, binary or environment triggered it:

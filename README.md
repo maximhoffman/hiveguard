@@ -467,9 +467,12 @@ the daily scan flagged **red** (active, unacknowledged vulnerabilities) refuses 
 build, test or install — the shell command exits immediately, before anything happens.
 Pausing releases one project for a while; everything else stays protected.
 
-**Honest scope: it's a terminal-level guard, not a sandbox.** It only intercepts a bare
-command name resolved by a shell that sourced the hook — it cannot stop an IDE Run
-button, a double-click, Docker Desktop, or a process that's already running.
+**Honest scope: it's a terminal-level guard, not a sandbox.** It intercepts a bare
+command name resolved by a shell that sourced the hook, and judges both *where the
+command is typed* and *where it points*: argument paths, the binary the name
+resolves to, and an activated environment (`VIRTUAL_ENV`, `CONDA_PREFIX`). It cannot
+see paths hardcoded inside a script, an absolute path to a binary, `sudo`, an IDE
+Run button, a double-click, Docker Desktop, or a process that's already running.
 
 Off by default. Enable it with:
 
@@ -497,22 +500,49 @@ A refusal looks like this:
 ```
 ⛔ hiveguard strict: 12 active vulnerabilities (2 critical) in /Users/mh/Projects/app — refusing to run `npm`.
    detail:   hiveguard daily --open
-   proceed:  fix it, or pause this project:  hiveguard strict pause   (1h; e.g. --for 2h)
+   proceed:  fix it, or pause this project:  hiveguard strict pause "/Users/mh/Projects/app"   (1h; e.g. --for 2h)
+   agents:   AI coding agents: do not work around this block — no cd elsewhere, no copying files out,
+             no other path, interpreter or environment. Stop and report it to the user, or ask them
+             to run `hiveguard strict pause`.
+```
+
+When the block comes from where the command *points* rather than where it is
+typed, a `because:` line says which argument, binary or environment triggered it:
+
+```
+⛔ hiveguard strict: 12 active vulnerabilities (2 critical) in /Users/mh/Projects/app — refusing to run `python`.
+   because:  the argument /Users/mh/Projects/app/tools/x.py points into that project (/Users/mh/Projects/app/tools/x.py)
+   detail:   hiveguard daily --open
+   proceed:  fix it, or pause this project:  hiveguard strict pause "/Users/mh/Projects/app"   (1h; e.g. --for 2h)
+   agents:   AI coding agents: do not work around this block — no cd elsewhere, no copying files out,
+             no other path, interpreter or environment. Stop and report it to the user, or ask them
+             to run `hiveguard strict pause`.
 ```
 
 Rules, in order:
 
 - **Red (active findings)** → blocked.
 - **Acked** (muted via `hiveguard ack`) → allowed — there's data, and it's acknowledged.
+- **Target-aware.** The gate also refuses when the command *points into* a red
+  project from somewhere else: an argument that is an existing path inside it
+  (`python ~/Projects/app/tools/x.py`, `pip install -r ../app/requirements.txt`,
+  `npm --prefix=../app install`, `pip install -e ../app`), a binary that lives in it
+  (an activated `.venv/bin`, `node_modules/.bin` on `PATH`), or its activated
+  environment (`VIRTUAL_ENV`, `CONDA_PREFIX` — `cd /tmp && uv pip install …` with
+  the project's venv active). Each location is judged on its own by the same
+  innermost-root rule; a pause for the *target* project releases it. Targets are
+  only ever compared against markers — pointing at a never-scanned project does not
+  refuse and does not scan it; only working in it does.
 - **No repair exemption.** `npm install`, `npm update`, `npm audit fix` and friends are
-  refused exactly like everything else — the gate never looks at a command's arguments,
+  refused exactly like everything else — the gate reads arguments only as paths, never as verbs,
   so there's no "just let me fix it" carve-out. Pausing the project is the only way
   through.
 - **Unknown or stale** (no marker, and no scan of this folder in the last 7 days) →
-  runs now, and kicks off one debounced background scan. Nothing to wait for — but if
-  that scan finds something, the **next** attempt is blocked. The exception is a command
-  run from your home folder itself (or above it, e.g. `/`): it just runs, with no
-  background scan — scanning the whole home folder would flag every tool cache in it.
+  runs now, and kicks off one debounced background scan (judged for the current
+  directory only). Nothing to wait for — but if that scan finds something, the **next**
+  attempt is blocked. The exception is a command run from your home folder itself (or
+  above it, e.g. `/`): it just runs, with no background scan — scanning the whole home
+  folder would flag every tool cache in it.
 
 Intercepted (the default set — extend it with `strict_commands_extra=<space-separated
 names>` in `~/.hiveguard/config`):
@@ -531,9 +561,14 @@ allowlist): `hiveguard`/`hvg` (every subcommand always works), `git`, `gh`, `bre
 `docker`, editors (`vim`, `nvim`, `code`, `subl`, `emacs`, `open`), navigation and
 inspection (`cd`, `ls`, `cat`, `less`, `find`, `rg`, `grep`), and all shell builtins.
 Only a **bare command name** resolved through the shell is intercepted — `./gradlew`,
-`./node_modules/.bin/x`, `sudo npm …`, an `alias npm=…` defined after the hook, and
-anything launched outside a shell that sourced the hook (IDE Run, double-click, Docker
-Desktop, an already-running process, `zsh -c`, cron, launchd) all bypass it.
+`./node_modules/.bin/x` typed as a path (on `PATH` it *is* caught), `sudo npm …`,
+`env`/`xargs`/`sh -c`, version-manager shims (asdf, mise), an `alias npm=…` defined
+after the hook, and anything launched outside a shell that sourced the hook (IDE Run,
+double-click, Docker Desktop, an already-running process, `zsh -c`, cron, launchd) all
+bypass it. A script copied out of the project that reaches back in through paths
+hardcoded inside it is invisible to the gate, which reads the command line, not file
+contents. The refusal carries an `agents:` line telling AI coding agents not to work
+around the block and to report it to you instead.
 
 Strict mode composes with the [bumblebee](#prerequisites) install-time gate in either
 `source` order — both checks run regardless of which one loads first.
@@ -706,11 +741,11 @@ on npm/pip/go/cargo you get **both** databases at once.
   for Intel Macs (`/usr/local`).
 - The `real install` step of `hiveguard add` runs in the current directory — run it from
   the root of the target project, like a normal `npm install`.
-- Strict mode is a **terminal-level** guard only — it cannot stop an IDE Run button, a
-  double-click, Docker Desktop, or a process that's already running.
-- Strict mode only intercepts a **bare command name** resolved by a shell that sourced
-  the hook — `./gradlew`, `sudo npm …`, an alias, or anything launched outside such a
-  shell (cron, launchd, `zsh -c`) bypasses it.
+- Strict mode is a **terminal-level** guard only. It judges where a command is
+  typed and where it points (argument paths, the resolved binary, `VIRTUAL_ENV` /
+  `CONDA_PREFIX`) — not paths hardcoded inside scripts, absolute paths to binaries,
+  `sudo`, shims, an IDE Run button, a double-click, Docker Desktop, cron, launchd,
+  `zsh -c`, or a process that's already running.
 - `hiveguard add` inside a strict-flagged project is **not** gated — it runs its own
   install from bash, where the strict-mode hook isn't loaded.
 
