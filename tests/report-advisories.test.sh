@@ -166,6 +166,11 @@ check "A: run file active[].fix" "0.60.0 4.1.11 4.1.11 3.3.18" \
   "$(runfix golang.org/x/net) $(runfix vitest) $(runfix @vitest/mocker) $(runfix nanoid)"
 check "A: status --json x/net fix" "0.60.0" \
   "$("$HG/bin/hiveguard" status --json </dev/null | jq -r '.active[] | select(.pkg=="golang.org/x/net") | .fix')"
+# the run file's lists and status --json order by the report's rank: HIGH, no score, MED
+check "A: run file active order (HIGH, no score, MED)" "nanoid|golang.org/x/net|@vitest/mocker|vitest" \
+  "$(jq -r '[.active[].pkg]|join("|")' "$HIVEGUARD_RUN")"
+check "A: status --json active order (HIGH, no score, MED)" "nanoid|golang.org/x/net|@vitest/mocker|vitest" \
+  "$("$HG/bin/hiveguard" status --json </dev/null | jq -r '[.active[].pkg]|join("|")')"
 
 # --- B. comparator and affected[] matching -------------------------------------
 SRC_B="$T/proj/synb/package-lock.json"

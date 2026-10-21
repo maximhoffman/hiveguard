@@ -201,6 +201,10 @@ DOC="$(jq -nc \
         elif ($root | startswith($home + "/")) then "~" + $root[($home | length):]
         else $root end;
 
+    # the severity rank of the report (osv-daily sev_rank): CRIT 5, HIGH 4, no score
+    # (0 / unknown) 3, MED 2, LOW 1 — unscored findings sit after HIGH, before MED
+    def sev_rank($s):
+      if $s >= 9 then 5 elif $s >= 7 then 4 elif $s <= 0 then 3 elif $s >= 4 then 2 else 1 end;
     def classify($entries):
       [ $entries[]
         | . as $e
@@ -211,7 +215,7 @@ DOC="$(jq -nc \
             version: $e.version, eco: $e.eco, sev: $e.sev, crit: (($e.sev // 0) >= 9),
             fix: $e.fix, ids_open: $open, ids_acked: $ack,
             anchor: $e.anchor, project_anchor: $e.project_anchor } ]
-      | sort_by([-(.sev // 0), .project, .pkg]);
+      | sort_by([-(sev_rank(.sev // 0)), -(.sev // 0), .project, .pkg]);
 
     classify($run.unseen // []) as $attention
   | classify($run.active // []) as $active

@@ -1537,9 +1537,10 @@ if sf and not render:
         k = (n["src"], n["pkg"]); m = merged.get(k)
         merged[k] = n if m is None else {**n, "ids": sorted(set(m["ids"]) | set(n["ids"]))}
     def order(e):
+        # the report's rank first (no score after HIGH, before MED), then the score
         try: sv = float(e.get("sev") or 0)
         except Exception: sv = 0.0
-        return (-sv, e.get("src") or "", e.get("pkg") or "")
+        return (-sev_rank(sv), -sv, e.get("src") or "", e.get("pkg") or "")
     unseen = sorted(merged.values(), key=order)
     this_run_new.sort(key=order)
     # every active package fragment (the report's Active rows) — what the app

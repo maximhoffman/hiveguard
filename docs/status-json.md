@@ -62,7 +62,7 @@ Types: `int` = JSON integer, `number` = JSON number, `epoch` = int Unix seconds.
 | `scan.last.counts.active.crit` | int | no | Critical packages in that block (same for `acked.crit`). |
 | `scan.last.counts.new_vulns` | int | no | Advisory ids new since the previous scan (the report's "new since last scan"). |
 | `scan.last.counts.resolved_vulns` | int | no | Advisory ids gone since the previous scan. |
-| `attention` | array of object | no | Findings that need the user: the run's `unseen` entries (new findings carried over until the report is opened) with each advisory id classified against the ack store (`HIVEGUARD_ACKS`, v1 or v2) by the same rule as the report — see "Ack rule". Entries with no open id are dropped. Sorted by `sev` descending, then `project`, then `pkg`. `[]` when there is no run. |
+| `attention` | array of object | no | Findings that need the user: the run's `unseen` entries (new findings carried over until the report is opened) with each advisory id classified against the ack store (`HIVEGUARD_ACKS`, v1 or v2) by the same rule as the report — see "Ack rule". Entries with no open id are dropped. Sorted by severity rank descending — CRIT (≥ 9), HIGH (≥ 7), no score (`sev` 0 / unknown), MED (≥ 4), LOW — then `sev` descending, then `project`, then `pkg` (the report's order; since 1.8.1 — before, unscored entries came last). `[]` when there is no run. |
 | `attention[].src` | string | no | The manifest/lockfile path the finding came from. |
 | `attention[].root` | string | no | The project root the finding belongs to. |
 | `attention[].project` | string | no | Display label for `root`: `$HOME/Projects/` stripped, else `$HOME` shown as `~`, else the path unchanged. |
