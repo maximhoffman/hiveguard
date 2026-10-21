@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-22
+
 ### Added
 - **Strict mode is target-aware.** The gate used to judge only the directory a command
   was typed in, so `cd /tmp && python ~/Projects/app/tools/x.py` or
