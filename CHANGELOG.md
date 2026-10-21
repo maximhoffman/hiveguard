@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-21
+
+The report says what each advisory is, names the right fix, and stops calling an
+unscored advisory "LOW".
+
 ### Added
 - **Advisory descriptions in the report.** The IDs column is now **Advisory**: it shows
   the worst advisory's id with a one-line description, and expands to every advisory of
