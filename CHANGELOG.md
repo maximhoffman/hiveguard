@@ -6,6 +6,17 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-10-21
+
+### Fixed
+- The waiting overlay vanished on its own: the report reloaded itself as soon as the
+  throwaway tab closed (before the app's dialog), and the fresh page had no overlay —
+  then the real return after the dialog went unnoticed and the project stayed in the
+  list until a manual refresh. The overlay now survives reloads and goes only when you
+  click it: the click refreshes the report, or, when the report is already fresh, just
+  lifts the overlay and plays the "marked as known" note, which waits behind the
+  overlay instead of fading out unseen.
+
 ## [1.8.2] - 2026-10-21
 
 ### Added
