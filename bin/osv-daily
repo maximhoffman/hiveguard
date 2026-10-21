@@ -1180,15 +1180,22 @@ links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
              "\n.gone{transition:opacity .8s}"
              "\n.gone>td,div.gone{background:var(--surface);color:var(--accent);font-family:var(--mono);font-size:12px;padding:8px 12px;outline:2px solid var(--accent);outline-offset:-2px;animation:hggone 1.2s ease-out}"
              "\ndiv.gone{margin:8px 0;border-radius:8px}"
-             "\n.gone.out{opacity:0}") if links_on else ""
-# links-only: after a button click the page reloads when the user comes back to it
-# (the app's dialog took the focus away), keeping the scroll position and the open
-# project cards. Armed for 2 min after a click; a return counts only after ≥1.2 s
-# away, so the throwaway tab's flash does not use it up — an early reload is
-# harmless (same report), the next return after the dialog shows the result.
-# An ack click also remembers the row/card and where it stood; once a reload shows it
-# has left the active list, a highlighted note takes its old place for ~2.5 s and
-# fades out (kept until then: an early reload still shows the row).
+             "\n.gone.out{opacity:0}"
+             "\n#hgwait{position:fixed;inset:0;z-index:50;background:rgba(14,19,22,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;cursor:pointer}"
+             "\n#hgwait>div{background:var(--surface);color:var(--text);border:1px solid var(--border-strong);border-radius:12px;padding:22px 26px;max-width:440px;margin:20px;font-family:var(--sans);box-shadow:0 12px 40px rgba(0,0,0,.35)}"
+             "\n#hgwait b{display:block;font-size:16px;margin-bottom:6px}"
+             "\n#hgwait span{color:var(--muted);font-size:13.5px}") if links_on else ""
+# links-only: a button click covers the report with a full-page "confirm in the
+# HiveGuard app" overlay (a click on it reloads at once), and the page reloads by
+# itself when the user comes back to it (the app's dialog took the focus away),
+# keeping the scroll position and the open project cards. Armed for 2 min after a
+# click; a return counts only after ≥1.2 s away — the throwaway tab's flash of
+# focus (it closes right after handing the link to the app) neither reloads nor
+# cancels the wait, so the real return after the dialog still reloads. Tab
+# visibility changes count like blur/focus. An ack click also remembers the
+# row/card and where it stood; once a reload shows it has left the active list, a
+# highlighted note takes its old place for ~2.5 s and fades out (kept until then:
+# an early reload still shows the row).
 links_js = (r'''
 <script>
 (function(){
@@ -1238,11 +1245,27 @@ links_js = (r'''
                project:pn ? pn.textContent : ''};
       }
     }
-    save(); }, true);
-  window.addEventListener('blur', function(){ if(Date.now()<until) away=Date.now(); });
-  window.addEventListener('focus', function(){
-    var back=away && Date.now()<until && Date.now()-away>=AWAY; away=0;
-    if(back){ save(); location.reload(); } });
+    save(); cover(); }, true);
+  function cover(){
+    if(document.getElementById('hgwait')) return;
+    var o=document.createElement('div'), b=document.createElement('div'), t=document.createElement('b'), m=document.createElement('span');
+    o.id='hgwait';
+    t.textContent='Confirm in the HiveGuard app';
+    m.textContent='The report refreshes itself when you come back to it. Click anywhere to refresh now.';
+    b.appendChild(t); b.appendChild(m); o.appendChild(b);
+    o.addEventListener('click', function(){ save(); location.reload(); });
+    document.body.appendChild(o);
+  }
+  function gone(){ if(Date.now()<until && !away) away=Date.now(); }
+  function back(){
+    if(!away) return;
+    if(Date.now()>=until){ away=0; return; }
+    if(Date.now()-away<AWAY) return;   // the throwaway tab's flash of focus: keep waiting
+    away=0; save(); location.reload();
+  }
+  window.addEventListener('blur', gone);
+  window.addEventListener('focus', back);
+  document.addEventListener('visibilitychange', function(){ if(document.hidden) gone(); else back(); });
 })();
 </script>''') if links_on else ""
 footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "

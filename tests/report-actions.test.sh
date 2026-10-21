@@ -121,6 +121,7 @@ links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "off: no hiveguard:// link"           "0" "$(count 'hiveguard://')"
 check "off: no act-link"                     "0" "$(count 'act-link')"
 check "off: no reload-on-return script"      "0" "$(count 'hiveguard-reload')"
+check "off: no waiting overlay"              "0" "$(count 'hgwait')"
 check "off: no cp-alt"                       "0" "$(count 'cp-alt')"
 check "off: no actg span"                    "0" "$(count 'actg')"
 check "off: today's copy buttons (mute x2, mute project)" "3" "$(count 'class="cp"')"
@@ -140,6 +141,9 @@ check "on: act-link count"                    "3" "$(count 'class="act-link')"
 check "on: every act-link opens in a new tab"  "3" "$(count 'class="act-link[^>]*" target="_blank" rel="noopener">')"
 # after a button click the page reloads once the user comes back from the app's dialog
 check "on: reload-on-return script, once"      "1" "$(count "var K='hiveguard-reload'")"
+check "on: waiting overlay — style, builder, click-to-reload, visibility" "1 1 1 1" \
+  "$(count '#hgwait{position:fixed') $(count "o.id='hgwait'") $(count "t.textContent='Confirm in the HiveGuard app'") $(count "addEventListener('visibilitychange'")"
+check "on: a flash of focus keeps the wait" "1" "$(count 'if(Date.now()-away<AWAY) return;')"
 check "on: it arms on a hiveguard: link click"  "1" "$(count "closest('a\[href^=\"hiveguard:\"\]')")"
 # after the reload a row/card that left is replaced for a moment by a highlighted note
 check "on: leaving-row note style, once"        "1" "$(count '\.gone{transition')"
