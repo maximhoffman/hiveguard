@@ -9,8 +9,10 @@
 #
 # The ten steps:
 #   1  a daily scan flags the vulnerable project red and records coverage
-#   2  strict on → the flagged project refuses `npm`, exit 77
-#   3  a pause releases that one project → the command runs again
+#   2  strict on → the flagged project refuses `npm`, exit 77 — also when it is
+#      only pointed at from elsewhere (`npm --prefix <project>` run from $HOME)
+#   3  a pause releases that one project → the command runs again, the target
+#      form too
 #   4  resume → refused again
 #   5  ack + re-scan → the marker flips to `acked` → the command runs
 #   6  ack --remove + re-scan → `active` again → refused
@@ -111,6 +113,16 @@ npm_try() {  # $1 = directory
     print rc=$?
   ' 2>"$ERR"
 }
+# Like npm_try, but with explicit npm arguments; $1 = directory, $2... = arguments.
+npm_try_args() {
+  local d="$1"; shift
+  HG_DIR="$d" PATH="$T/stubs:$PATH" zsh -f -c '
+    source "$HG_HOOK"
+    cd "$HG_DIR" || { print "rc=cd-failed"; exit 9 }
+    npm "$@"
+    print rc=$?
+  ' _ "$@" 2>"$ERR"
+}
 rc_of() { printf '%s\n' "$1" | sed -n 's/^rc=//p' | tail -n1; }
 
 # --- 1. a daily scan flags the project and records coverage ------------------
@@ -137,6 +149,19 @@ contains "the refusal names the command in backticks" \
   '— refusing to run `npm`.' "$(head -n1 "$ERR")"
 contains "the refusal points at the report" "hiveguard daily --open" "$(cat "$ERR")"
 contains "the refusal offers the pause" "hiveguard strict pause" "$(cat "$ERR")"
+contains "the cwd refusal carries the agent line" \
+  "AI coding agents: do not work around this block" "$(cat "$ERR")"
+
+# The same project, but only pointed at: cwd is $HOME (never scanned, so no probe).
+out="$(npm_try_args "$HOME" --prefix "$T/proj/app" test)"
+check "an argument into a red project is refused with 77" "77" "$(rc_of "$out")"
+lacks "the command never reached the binary" "REAL npm" "$out"
+contains "the refusal gives the argument as its reason" \
+  "because:  the argument $T/proj/app points into that project ($T/proj/app)" "$(sed -n 2p "$ERR")"
+contains "the proceed line names the root" \
+  "hiveguard strict pause \"$T/proj/app\"" "$(cat "$ERR")"
+contains "the target refusal carries the agent line" \
+  "AI coding agents: do not work around this block" "$(cat "$ERR")"
 
 # --- 3. a pause releases that one project ------------------------------------
 STEP=3
@@ -144,6 +169,9 @@ STEP=3
 out="$(npm_try "$T/proj/app")"
 check "a paused project runs again" "0" "$(rc_of "$out")"
 contains "the real command ran" "REAL npm test" "$out"
+out="$(npm_try_args "$HOME" --prefix "$T/proj/app" test)"
+check "a paused project runs when only pointed at" "0" "$(rc_of "$out")"
+contains "the real command ran with its arguments" "REAL npm --prefix $T/proj/app test" "$out"
 
 # --- 4. resume re-blocks it ---------------------------------------------------
 STEP=4
