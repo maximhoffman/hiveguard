@@ -6,6 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-10-21
+
+### Added
+- **A waiting overlay after a report button click.** As soon as you click *mark as
+  known* / *mark project as known* / *pause strict*, the report is covered by a
+  full-page note — "Confirm in the HiveGuard app. The report refreshes itself when you
+  come back to it. Click anywhere to refresh now." — so it is clear the report is
+  waiting for the app, not ignoring the click. A click on the note reloads at once.
+
+### Fixed
+- The report did not always reload by itself after the app's confirmation: the
+  throwaway tab that hands the link to the app closes right away and gives the report a
+  flash of focus, which the page took for "the user is back" and then ignored the real
+  return. That flash no longer counts; tab visibility changes count like focus.
+
 ## [1.8.1] - 2026-10-21
 
 ### Fixed
