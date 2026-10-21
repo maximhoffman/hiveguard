@@ -1186,16 +1186,17 @@ links_css = ("\n.actg{display:inline-flex;align-items:center;gap:6px;flex:none}"
              "\n#hgwait b{display:block;font-size:16px;margin-bottom:6px}"
              "\n#hgwait span{color:var(--muted);font-size:13.5px}") if links_on else ""
 # links-only: a button click covers the report with a full-page "confirm in the
-# HiveGuard app" overlay (a click on it reloads at once), and the page reloads by
-# itself when the user comes back to it (the app's dialog took the focus away),
-# keeping the scroll position and the open project cards. Armed for 2 min after a
-# click; a return counts only after ≥1.2 s away — the throwaway tab's flash of
-# focus (it closes right after handing the link to the app) neither reloads nor
-# cancels the wait, so the real return after the dialog still reloads. Tab
-# visibility changes count like blur/focus. An ack click also remembers the
-# row/card and where it stood; once a reload shows it has left the active list, a
-# highlighted note takes its old place for ~2.5 s and fades out (kept until then:
-# an early reload still shows the row).
+# HiveGuard app" overlay. The overlay survives reloads (its state lives in
+# sessionStorage with the 2-min arming window) and goes ONLY on a click: the click
+# reloads the page, or — when an automatic reload behind the overlay already shows
+# the row gone — just lifts the overlay and plays the leaving note. The page also
+# reloads by itself when the user comes back to it (the app's dialog took the focus
+# away), keeping the scroll position and the open project cards; a return counts
+# only after ≥1.2 s away, the throwaway tab's flash of focus neither reloads nor
+# cancels the wait, and tab visibility changes count like blur/focus. An ack click
+# remembers the row/card and where it stood; once a page shows it has left the
+# active list — and the overlay is gone — a highlighted note takes its old place for
+# ~2.5 s and fades out.
 links_js = (r'''
 <script>
 (function(){
@@ -1203,8 +1204,8 @@ links_js = (r'''
   try{ s=JSON.parse(sessionStorage.getItem(K)||'null'); }catch(e){}
   if(s){ (s.open||[]).forEach(function(id){ var d=document.getElementById(id); if(d) d.open=true; });
          if(typeof s.y==='number') window.scrollTo(0,s.y); }
-  var until=(s&&s.until)||0, leave=(s&&Date.now()<until&&s.leave)||null;
-  function save(){ try{ sessionStorage.setItem(K, JSON.stringify({until:until, leave:leave, y:window.scrollY,
+  var until=(s&&s.until)||0, leave=(s&&Date.now()<until&&s.leave)||null, waiting=!!(s&&Date.now()<until&&s.waiting);
+  function save(){ try{ sessionStorage.setItem(K, JSON.stringify({until:until, leave:leave, waiting:waiting, y:window.scrollY,
     open:[].map.call(document.querySelectorAll('details[open][id]'), function(d){ return d.id; })})); }catch(e){} }
   function active(el){ return !!el && !el.closest('.ackwrap'); }
   function showGone(){
@@ -1230,11 +1231,11 @@ links_js = (r'''
     setTimeout(function(){ note.classList.add('out'); }, 1800);
     setTimeout(function(){ if(note.parentNode) note.parentNode.removeChild(note); }, 2700);
   }
-  showGone();
+  if(waiting) cover(); else showGone();   // the note waits behind the overlay until it is clicked away
   document.addEventListener('click', function(e){
     var a=e.target.closest && e.target.closest('a[href^="hiveguard:"]');
     if(!a) return;
-    until=Date.now()+ARM; leave=null;
+    until=Date.now()+ARM; leave=null; waiting=true;
     if(/^hiveguard:\/\/ack(-project)?\?/.test(a.getAttribute('href'))){
       var row=a.closest('tr[id]'), card=a.closest('details.proj[id]'), el=row||card;
       if(el){
@@ -1253,7 +1254,13 @@ links_js = (r'''
     t.textContent='Confirm in the HiveGuard app';
     m.textContent='The report refreshes itself when you come back to it. Click anywhere to refresh now.';
     b.appendChild(t); b.appendChild(m); o.appendChild(b);
-    o.addEventListener('click', function(){ save(); location.reload(); });
+    o.addEventListener('click', function(){
+      // the overlay goes only on a click: if this page already shows the row gone
+      // (an automatic reload happened behind the overlay) play the note, else reload
+      waiting=false; save();
+      if(leave && !active(document.getElementById(leave.id))){ o.parentNode.removeChild(o); showGone(); }
+      else location.reload();
+    });
     document.body.appendChild(o);
   }
   function gone(){ if(Date.now()<until && !away) away=Date.now(); }
