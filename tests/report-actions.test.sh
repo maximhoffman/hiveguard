@@ -9,6 +9,10 @@
 #     exact hrefs (percent-encoded with no safe characters, HTML-escaped), the
 #     terminal command tucked behind a small `copy` button, the CSS and footer
 #   - pause links (1 h / 2 h) only when strict mode is on, with the realpath'd root
+#   - a root with a running strict pause: "strict paused until …" badge and a
+#     "resume strict" copy button instead of the pause links (app on or off);
+#     expired / malformed / foreign rows, strict off, probe and acked roots show
+#     nothing and leave the exact no-pause bytes; the pauses file is never written
 #   - a pierced (muted-badge) row gets a `mark as known` link; the Acknowledged section
 #     keeps its unmute buttons and never gets a link
 #   - --probe reports and a dead app pid never render links
@@ -116,6 +120,15 @@ J() { jq -r "$@" "$HIVEGUARD_RUN" 2>/dev/null | paste -sd' ' -; }
 ENC="$(enc "$SRC")"; ROOTENC="$(enc "$T/proj/app")"
 dead_pid() { sh -c 'exit 0' & p=$!; wait "$p" 2>/dev/null; printf '%s' "$p"; }
 
+# strict pauses (plan 2026-10-22 §2.3): rows written directly, never via the CLI here
+render() { "$HG/bin/osv-daily" --render >/dev/null 2>&1 </dev/null; }   # rc = osv-daily's
+PAUSES="$HIVEGUARD_PAUSES"
+pause_row()   { printf '%s\t%s\n' "$1" "$2" >> "$PAUSES"; }        # root until_epoch (append)
+when_of()     { if [ "$(date -r "$1" +%Y-%m-%d)" = "$(date +%Y-%m-%d)" ]; then date -r "$1" '+%H:%M'; else date -r "$1" '+%Y-%m-%d %H:%M'; fi; }
+badge_of()    { printf '<span class="pausedbadge" data-until="%s" title="Strict mode is paused for this project until %s. It lifts on its own then, or earlier with “resume strict”.">strict paused until %s</span>' "$1" "$(when_of "$1")" "$(when_of "$1")"; }
+RES_BTN="<button class=\"cp res\" type=\"button\" data-cmd=\"hiveguard strict resume $T/proj/app\" title=\"Copy the command that lifts the pause now, then paste it in your terminal\">resume strict</button>"
+A="$T/proj/app"
+
 # --- 1. app NOT running → today's report --------------------------------------
 links_off; strict_off; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
 check "off: no hiveguard:// link"           "0" "$(count 'hiveguard://')"
@@ -192,6 +205,89 @@ check "strict: root that is the scan target gets no pause link" "0 1" \
   "$(count 'hiveguard://pause') $(count '>mark project as known</a>')"
 strict_off
 
+# --- 3b. a paused root → badge + resume copy button instead of the pause links -----
+# Every state change goes through `render` (the stamp is kept), so `cmp` against a
+# baseline taken from the same saved scan is valid; never cmp across scans.
+strict_on; links_on; reset_scan; scan "$T/run2.json"; render
+cp "$REPORT" "$T/strict.html"                                  # strict on, app on, no pause
+NOW="$(date +%s)"
+pause_row "$A" $((NOW+3600)); render
+check "3b: badge, exact markup" "1" "$(count "$(badge_of $((NOW+3600)))")"
+check "3b: no pause link for a paused root" "0" "$(count 'hiveguard://pause')"
+check "3b: act-links = the three ack links" "3" "$(count 'class="act-link')"
+check "3b: resume button, exact markup" "1" "$(count "$RES_BTN")"
+check "3b: resume button sits in the pause slot" "1" \
+  "$(count "mark project as known</a>${RES_BTN}<button class=\"cp cp-alt\"")"
+check "3b: badge sits right after the name block" "1" "$(count '</span></span><span class="pausedbadge"')"
+check "3b: badge CSS once" "1 1" "$(count '\.pausedbadge{') $(count '\.pausedbadge\.ended{')"
+check "3b: expiry JS once" "1 1" "$(count "b.textContent='strict pause ended'") $(count 'setInterval(tick, 30000)')"
+check "3b: pause CSS is the last rule of the style block" "1" \
+  "$(grep -A1 '^\.pausedbadge\.ended{' "$REPORT" | grep -c '^</style>$')"
+check "3b: no muted badge here" "0" "$(count 'class="mutedbadge"')"
+P0="$(md5 -q "$PAUSES")"; render
+check "3b: the pauses file is never written by a render" "$P0" "$(md5 -q "$PAUSES")"
+
+# a pause that ends on another day → the CLI's long form YYYY-MM-DD HH:MM
+: > "$PAUSES"; pause_row "$A" $((NOW+3*86400)); render
+check "3b: long-form badge" "1" "$(count "$(badge_of $((NOW+3*86400)))")"
+check "3b: long-form WHEN is a date" "1" \
+  "$(count "strict paused until [0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]</span>")"
+
+# rows that do not count → the exact no-pause bytes
+: > "$PAUSES"; pause_row "$A" $((NOW-5)); render
+cmp -s "$T/strict.html" "$REPORT"; check "3b: expired row → no-pause report" "0" "$?"
+bad_rows="$(printf '%s\n%s\t%s\n%s\t\n\t%s\n\n%s\t%s\n' "$A" "$A" abc "$A" $((NOW+3600)) "$A" 12.5)"
+i=0
+while IFS= read -r row; do
+  i=$((i + 1)); printf '%s\n' "$row" > "$PAUSES"; render
+  cmp -s "$T/strict.html" "$REPORT"; check "3b: malformed row $i alone → no-pause report" "0" "$?"
+  check "3b: malformed row $i alone → no badge" "0" "$(count 'pausedbadge')"
+done <<EOF
+$bad_rows
+EOF
+printf '%s\n' "$bad_rows" > "$PAUSES"; render
+cmp -s "$T/strict.html" "$REPORT"; check "3b: all malformed rows together → no-pause report" "0" "$?"
+check "3b: all malformed rows together → no badge" "0" "$(count 'pausedbadge')"
+rm -f "$PAUSES"; render
+cmp -s "$T/strict.html" "$REPORT"; check "3b: missing pauses file → no-pause report" "0" "$?"
+pause_row "$T/elsewhere" $((NOW+3600)); render
+cmp -s "$T/strict.html" "$REPORT"; check "3b: another root paused → no-pause report" "0" "$?"
+
+# strict off: no pause state shown even with a running pause
+strict_off; : > "$PAUSES"; render; cp "$REPORT" "$T/off.html"
+pause_row "$A" $((NOW+3600)); render
+check "3b: strict off → no badge, no pause link" "0 0" "$(count 'pausedbadge') $(count 'hiveguard://pause')"
+cmp -s "$T/off.html" "$REPORT"; check "3b: strict off → same bytes as without the pause" "0" "$?"
+
+# app off: the badge and the resume button follow "mute project"
+links_off; strict_on; : > "$PAUSES"; render; cp "$REPORT" "$T/appoff.html"
+pause_row "$A" $((NOW+3600)); render
+check "3b: app off → badge shown" "1" "$(count 'class="pausedbadge"')"
+check "3b: app off → no act-link" "0" "$(count 'act-link')"
+check "3b: app off → plain copy buttons (mute x2, mute project)" "3" "$(count 'class="cp"')"
+check "3b: app off → one resume button" "1" "$(count 'class="cp res"')"
+check "3b: app off → resume follows mute project" "1" "$(count "mute project</button>${RES_BTN}")"
+: > "$PAUSES"; render
+cmp -s "$T/appoff.html" "$REPORT"; check "3b: app off → pause gone → same bytes as before" "0" "$?"
+links_on; strict_off
+
+# probe reports never show it
+links_on; strict_on; : > "$PAUSES"; pause_row "$A" $((NOW+3600))
+STUB_JSON="$T/run2.json" "$HG/bin/osv-daily" --probe "$A" >/dev/null 2>&1 </dev/null
+check "3b: probe → report written, no badge" "yes 0" \
+  "$([ -s "$HOME/.hiveguard/osv-probe.html" ] && echo yes || echo no) $(count 'pausedbadge' "$HOME/.hiveguard/osv-probe.html")"
+
+# an acked project has no active card → nothing to show
+reset_scan; scan "$T/run1.json"; "$HG/bin/hiveguard" ack "$SRC" >/dev/null 2>&1 </dev/null
+pause_row "$A" $((NOW+3600)); render
+check "3b: acked root → no badge" "0" "$(count 'pausedbadge')"
+
+# the scan path reads the pauses too
+reset_scan; strict_on; links_on; pause_row "$A" $((NOW+3600)); scan "$T/run2.json"
+check "3b: scan → badge, no pause link" "1 0" "$(count 'class="pausedbadge"') $(count 'hiveguard://pause')"
+check "3b: --help documents the pause badge" "1" "$(count 'strict paused until' <("$HG/bin/osv-daily" --help))"
+strict_off
+
 # --- 4. pierced row → mark-as-known link; acked section untouched --------------------
 reset_scan; scan "$T/run1.json"; "$HG/bin/hiveguard" ack "$SRC" fast-uri >/dev/null </dev/null; scan "$T/run2.json"
 check "pierced: mark-as-known links (pierced + ordinary row) + package-form href" "2 1" \
@@ -251,6 +347,9 @@ links_off; reset_scan; rm -f "$T_LOG_NOTIFY"; scan "$T/run1.json"
 check "notifier still fires with the app not running" "1" "$(wc -l < "$T_LOG_NOTIFY" 2>/dev/null | tr -d ' ')"
 links_on; rm -f "$T_LOG_NOTIFY"; scan "$T/run1.json"
 check "notifier skipped with the app running" "absent" "$([ -e "$T_LOG_NOTIFY" ] && echo present || echo absent)"
+strict_on; pause_row "$A" $(( $(date +%s) + 3600 )); P0="$(md5 -q "$PAUSES")"; scan "$T/run1.json"
+check "pauses file untouched by a scan" "$P0" "$(md5 -q "$PAUSES")"
+strict_off
 check "no launchd agent touched" "0" "$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -c hiveguard)"
 
 if [ "$FAILED" = 0 ]; then echo "all report-actions checks passed"; else echo "report-actions: FAILURES above"; fi

@@ -11,8 +11,8 @@
 #   hiveguard strict status                     # on/off, hook, blocked roots, running pauses (default)
 #   hiveguard strict on                         # enable strict mode
 #   hiveguard strict off                        # disable strict mode
-#   hiveguard strict pause [path] [--for 2h]    # release ONE project for a while (default 1h; Nm/Nh/Nd)
-#   hiveguard strict resume [path | --all]      # lift a pause early
+#   hiveguard strict pause [path] [--for 2h]    # release ONE project for a while (default 1h; Nm/Nh/Nd); re-renders the report
+#   hiveguard strict resume [path | --all]      # lift a pause early; re-renders the report
 #   hiveguard strict _bgscan [--dry-run] <root> # internal: background scan for an unknown project
 #   hiveguard strict -h | --help                # show this help
 #
@@ -24,11 +24,13 @@
 # A pause is time-based, per project and cross-shell: closing the terminal does
 # not end it, a new terminal honours it, and it expires on its own. Other
 # projects stay protected for its whole duration.
+# Every pause/resume re-renders the daily report (no scan) so an open report shows the pause after a reload.
 #
 # State files (env override → default):
 #   HIVEGUARD_CONFIG  → ~/.hiveguard/config            # strict=1|0 (+ other keys)
 #   HIVEGUARD_MARKERS → ~/.hiveguard/osv-markers.tsv   # root<TAB>status<TAB>summary
 #   HIVEGUARD_PAUSES  → ~/.hiveguard/strict-pauses.tsv # root<TAB>until_epoch
+#   HIVEGUARD_STATE   → ~/.hiveguard/osv-last-scan.json  # read only: is there a report to refresh?
 #   HIVEGUARD_SCHED_PLIST → the launchd plist          # which folders are scheduled
 #   (fixed) ~/.hiveguard/strict.log                    # one line per background scan
 set -euo pipefail
@@ -49,6 +51,7 @@ REPO="$(cd "$BINDIR/.." && pwd)"
 CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
 MARKERS="${HIVEGUARD_MARKERS:-$HOME/.hiveguard/osv-markers.tsv}"
 PAUSES="${HIVEGUARD_PAUSES:-$HOME/.hiveguard/strict-pauses.tsv}"
+STATE="${HIVEGUARD_STATE:-$HOME/.hiveguard/osv-last-scan.json}"
 SCHED_PLIST="${HIVEGUARD_SCHED_PLIST:-$HOME/Library/LaunchAgents/com.hiveguard.osv-daily.plist}"
 STRICT_LOG="$HOME/.hiveguard/strict.log"
 
@@ -188,6 +191,24 @@ pause_running_for() {  # root — 0 when a still-running pause row exists
     'NF>=2 && $1==r && $2+0>now{found=1} END{exit found?0:1}' "$PAUSES"
 }
 
+# --- report refresh ----------------------------------------------------------
+# Re-render the daily report from the saved scan so an open report shows the pause
+# state after a reload (same mechanism as `hiveguard ack`). Never fails the verb: a
+# refresh that cannot happen is a note on stderr; no saved scan at all → silent.
+refresh_report() {
+  [ -f "$STATE" ] || return 0
+  local err reason; err="$(mktemp)"
+  if "$BINDIR/osv-daily" --render >/dev/null 2>"$err" </dev/null; then
+    echo "  report refreshed (reload it if it is open)"
+  else
+    reason="$(tail -n1 "$err" | sed 's/^osv-daily: //')"
+    [ -n "$reason" ] || reason="osv-daily --render failed"
+    echo "  (report not refreshed: $reason)" >&2
+  fi
+  rm -f "$err"
+  return 0
+}
+
 # --- schedule ----------------------------------------------------------------
 # The folders configured for the daily scan — the launchd plist is the single
 # source of truth (same extraction as osv-daily's fallback; paths may contain
@@ -304,6 +325,7 @@ case "$verb" in
     printf '  lift early: hiveguard strict resume "%s"\n' "$root"
     has_active_marker "$root" || \
       echo "  (note: this project is not currently flagged — the pause is recorded anyway)"
+    refresh_report
     ;;
 
   resume)
@@ -311,6 +333,7 @@ case "$verb" in
       mkdir -p "$(dirname "$PAUSES")"
       : > "$PAUSES"
       echo "✔ All pauses lifted."
+      refresh_report
       exit 0
     fi
     case "${1:-}" in
@@ -331,6 +354,7 @@ case "$verb" in
     fi
     if [ "$lifted" = 1 ]; then
       echo "✔ Pause lifted for $root."
+      refresh_report
     else
       echo "No pause active for $root."
     fi

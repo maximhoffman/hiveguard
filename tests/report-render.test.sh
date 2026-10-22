@@ -19,6 +19,9 @@
 #     state → 3, flag combinations → 2), recreation of a deleted report with the
 #     state's mtime, the probe report untouched, timing, --help
 #   - the run file's key lists are unchanged
+#   - strict pauses are read at render time (badge in, pause links out, back to the
+#     exact bytes when the pause goes); `strict pause` / `resume` / `resume --all`
+#     re-render by themselves, with the same failure notes as `hiveguard ack`
 #
 # Fully offline: osv-scanner is a stub on HIVEGUARD_TOOL_PATH that replays a
 # JSON fixture. Runs under an isolated HOME with every HIVEGUARD_* override set,
@@ -134,6 +137,14 @@ EOF
 }
 mk_fixture_split "$T/split.json"
 TAB="$(printf '\t')"
+
+# strict pauses (plan 2026-10-22 §2.3): rows written with pause_row, except in M (the CLI on purpose)
+PAUSES="$HIVEGUARD_PAUSES"
+pause_row()   { printf '%s\t%s\n' "$1" "$2" >> "$PAUSES"; }        # root until_epoch (append)
+when_of()     { if [ "$(date -r "$1" +%Y-%m-%d)" = "$(date +%Y-%m-%d)" ]; then date -r "$1" '+%H:%M'; else date -r "$1" '+%Y-%m-%d %H:%M'; fi; }
+badge_of()    { printf '<span class="pausedbadge" data-until="%s" title="Strict mode is paused for this project until %s. It lifts on its own then, or earlier with “resume strict”.">strict paused until %s</span>' "$1" "$(when_of "$1")" "$(when_of "$1")"; }
+RES_BTN="<button class=\"cp res\" type=\"button\" data-cmd=\"hiveguard strict resume $T/proj/app\" title=\"Copy the command that lifts the pause now, then paste it in your terminal\">resume strict</button>"
+A="$T/proj/app"
 
 # --- A. render right after a scan: byte-identical (stamp included), mtime kept, scan state untouched ---
 links_off; strict_off; reset_scan; rm -f "$REPORT"; scan "$T/run1.json"; scan "$T/run2.json"
@@ -325,5 +336,72 @@ check "K: two lockfiles → npm tag" "1" "$(count '<span class="pn">proj / app<s
 check "K: two lockfiles → yarn tag" "1" "$(count '<span class="pn">proj / app<span class="lt">yarn</span></span>')"
 rm -f "$SRC2"
 check "K: the leaving note names the project by its folder" "1" "$(links_on; render; count "querySelector('.pn')")"
+
+# --- L. strict pauses are read at render time ---
+links_on; strict_on; reset_scan; scan "$T/run1.json"; scan "$T/run2.json"
+cp "$REPORT" "$T/strict.html"; S0="$(scan_sig)"; touch -t 202601010000 "$REPORT"
+NOW="$(date +%s)"
+pause_row "$A" $((NOW+3600)); render; check "L: render rc with a pause" "0" "$?"
+check "L: badge, exact markup" "1" "$(count "$(badge_of $((NOW+3600)))")"
+check "L: no pause link for the paused root" "0" "$(count 'hiveguard://pause')"
+check "L: report mtime kept" "202601010000" "$(date -r "$(mtime "$REPORT")" '+%Y%m%d%H%M')"
+check "L: scan state untouched" "$S0" "$(scan_sig)"
+check "L: render log line" "1" "$(tail -n1 "$HOME/.hiveguard/osv-daily.log" | grep -c '] render projects=1 ')"
+: > "$PAUSES"; render
+cmp -s "$T/strict.html" "$REPORT"; check "L: pause gone → back to the exact scan bytes" "0" "$?"
+pause_row "$A" $((NOW+3600)); scan "$T/run2.json"; cp "$REPORT" "$T/scan-p.html"; render
+check "L: a scan with the pause shows the badge" "1" "$(count 'class="pausedbadge"' "$T/scan-p.html")"
+cmp -s "$T/scan-p.html" "$REPORT"; check "L: scan and render agree with a pause" "0" "$?"
+
+# --- M. `strict pause` / `resume` refresh the report by themselves (mirrors J) ---
+SM="$HG/bin/strict-mode"; R_LINE="  report refreshed (reload it if it is open)"
+log_lines() { wc -l < "$HOME/.hiveguard/osv-daily.log" | tr -d ' '; }
+rm -f "$PAUSES"; render; cp "$REPORT" "$T/strict.html"      # no-pause baseline of this state
+S0="$(scan_sig)"; touch -t 202601010000 "$REPORT"; L0="$(log_lines)"; rm -f "$T_LOG_NOTIFY"
+M0="$(cat "$HIVEGUARD_MARKERS")"
+OUT="$("$SM" pause "$A" --for 1h </dev/null)"; check "M: pause rc" "0" "$?"
+check "M: pause prints the refreshed line last" "$R_LINE" "$(printf '%s\n' "$OUT" | tail -n1)"
+check "M: pause output has 3 lines" "3" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "M: badge / pause links / resume button" "1 0 1" \
+  "$(count 'class="pausedbadge"') $(count 'hiveguard://pause') $(count '>resume strict</button>')"
+check "M: one pause row" "1" "$(wc -l < "$PAUSES" | tr -d ' ')"
+check "M: badge carries the CLI's until (WHEN = when_of)" "1" "$(count "$(badge_of "$(cut -f2 "$PAUSES")")")"
+check "M: report mtime kept" "202601010000" "$(date -r "$(mtime "$REPORT")" '+%Y%m%d%H%M')"
+check "M: scan state untouched" "$S0" "$(scan_sig)"
+check "M: no notification" "silent" "$([ -e "$T_LOG_NOTIFY" ] && echo notified || echo silent)"
+check "M: folder markers unchanged by a pause" "$M0" "$(cat "$HIVEGUARD_MARKERS")"
+OUT="$("$SM" resume "$A" </dev/null)"; check "M: resume rc" "0" "$?"
+check "M: resume → lifted + refreshed (2 lines)" "✔ Pause lifted for $A.|$R_LINE" "$(printf '%s\n' "$OUT" | paste -sd'|' -)"
+cmp -s "$T/strict.html" "$REPORT"; check "M: resume → back to the no-pause bytes" "0" "$?"
+L1="$(log_lines)"
+OUT="$("$SM" resume "$A" </dev/null)"
+check "M: nothing to lift → one line, no refresh" "No pause active for $A." "$OUT"
+check "M: nothing to lift → no render" "$L1" "$(log_lines)"
+"$SM" pause "$A" --for 2h >/dev/null </dev/null
+OUT="$("$SM" resume --all </dev/null)"; check "M: resume --all rc" "0" "$?"
+check "M: resume --all → lifted + refreshed" "✔ All pauses lifted.|$R_LINE" "$(printf '%s\n' "$OUT" | paste -sd'|' -)"
+cmp -s "$T/strict.html" "$REPORT"; check "M: resume --all → back to the no-pause bytes" "0" "$?"
+check "M: four render log lines (pause, resume, pause, resume --all)" "4" "$(( $(log_lines) - L0 ))"
+# failure paths: the pause is recorded, the note goes to stderr, exit 0
+R0="$(md5 -q "$REPORT")"; printf '%s' "$$" > "$HIVEGUARD_SCAN_PID"
+OUT="$("$SM" pause "$A" 2>&1 >/dev/null </dev/null)"; RC=$?; rm -f "$HIVEGUARD_SCAN_PID"
+check "M: scan running → rc 0" "0" "$RC"
+check "M: scan running → note" "  (report not refreshed: a scan is in progress (pid $$); it writes a fresh report itself)" "$OUT"
+check "M: scan running → the pause is recorded" "1" "$(wc -l < "$PAUSES" | tr -d ' ')"
+check "M: scan running → report kept" "$R0" "$(md5 -q "$REPORT")"
+"$SM" resume --all >/dev/null 2>&1 </dev/null
+cp "$HIVEGUARD_STATE" "$T/state.bak"; jq 'del(.render)' "$T/state.bak" > "$HIVEGUARD_STATE"
+OUT="$("$SM" pause "$A" 2>&1 >/dev/null </dev/null)"; RC=$?; cp "$T/state.bak" "$HIVEGUARD_STATE"
+check "M: predates → rc 0" "0" "$RC"
+check "M: predates → note" "  (report not refreshed: the saved scan predates report re-rendering — run: hiveguard daily)" "$OUT"
+check "M: predates → the pause is recorded" "1" "$(wc -l < "$PAUSES" | tr -d ' ')"
+"$SM" resume --all >/dev/null 2>&1 </dev/null
+rm -f "$HIVEGUARD_STATE"
+OUT="$("$SM" pause "$A" --for 1h 2>&1 </dev/null)"; RC=$?
+check "M: no state → rc 0" "0" "$RC"
+check "M: no state → exactly the two pause lines" "2" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "M: no state → no refresh line, no note" "0" "$(printf '%s\n' "$OUT" | grep -c 'refreshed')"
+check "M: no state → resume prints just the lift" "✔ Pause lifted for $A." "$("$SM" resume "$A" 2>&1 </dev/null)"
+cp "$T/state.bak" "$HIVEGUARD_STATE"
 
 exit "$FAILED"

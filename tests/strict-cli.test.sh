@@ -126,6 +126,42 @@ check "resume: exits 0 with nothing to lift" 0 "$("$SM" resume "$T/proj/app" >/d
 check "resume --all: confirms" "✔ All pauses lifted." "$("$SM" resume --all)"
 check "resume --all: empties the file" 0 "$(wc -l < "$HIVEGUARD_PAUSES" | tr -d ' ')"
 
+# --- report refresh (pause/resume re-render the report) ------------------------
+out="$("$SM" pause "$T/proj/app" --for 1h 2>&1)"
+check "pause: no saved scan → 2 lines" 2 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+check "pause: no saved scan → no refresh line" 0 "$(printf '%s\n' "$out" | grep -c refresh)"
+"$SM" resume --all >/dev/null
+
+NOTE_PREDATES="  (report not refreshed: the saved scan predates report re-rendering — run: hiveguard daily)"
+printf '{"schema":1}\n' > "$HIVEGUARD_STATE"
+err="$("$SM" pause "$T/proj/app" --for 1h 2>&1 >/dev/null)"; rc=$?
+check "pause: old saved scan → exit 0" 0 "$rc"
+check "pause: old saved scan → note on stderr" "$NOTE_PREDATES" "$err"
+check "pause: old saved scan → stdout is headline + lift early" 2 \
+  "$("$SM" pause "$T/proj/app" --for 1h 2>/dev/null | wc -l | tr -d ' ')"
+check "pause: old saved scan → the pause row exists" "$T/proj/app" "$(cut -f1 "$HIVEGUARD_PAUSES")"
+
+err="$("$SM" resume "$T/proj/app" 2>&1 >/dev/null)"
+check "resume: old saved scan → note on stderr" "$NOTE_PREDATES" "$err"
+"$SM" pause "$T/proj/app" --for 1h >/dev/null 2>&1
+check "resume: old saved scan → stdout first line" "✔ Pause lifted for $T/proj/app." \
+  "$("$SM" resume "$T/proj/app" 2>/dev/null | head -n1)"
+check "resume: nothing to lift → no render attempted" "No pause active for $T/proj/app." \
+  "$("$SM" resume "$T/proj/app" 2>&1)"
+
+"$SM" pause "$T/proj/app" --for 1h >/dev/null 2>&1
+err="$("$SM" resume --all 2>&1 >/dev/null)"
+check "resume --all: old saved scan → note on stderr" "$NOTE_PREDATES" "$err"
+check "resume --all: old saved scan → stdout" "✔ All pauses lifted." "$("$SM" resume --all 2>/dev/null)"
+
+printf '%s' "$$" > "$HOME/.hiveguard/osv-daily.pid"
+err="$("$SM" pause "$T/proj/app" --for 1h 2>&1 >/dev/null)"; rc=$?
+check "pause: scan in progress → exit 0" 0 "$rc"
+check "pause: scan in progress → note on stderr" \
+  "  (report not refreshed: a scan is in progress (pid $$); it writes a fresh report itself)" "$err"
+rm -f "$HOME/.hiveguard/osv-daily.pid" "$HIVEGUARD_STATE"
+"$SM" resume --all >/dev/null
+
 printf '%s\t%s\n' "$T/proj/app" "$(( $(date +%s) - 5 ))" > "$HIVEGUARD_PAUSES"
 "$SM" status >/dev/null
 check "status: prunes expired pause rows" 0 "$(wc -l < "$HIVEGUARD_PAUSES" | tr -d ' ')"
@@ -186,6 +222,11 @@ if [ "$("$SM" --help | grep -c 'hiveguard strict pause')" -ge 1 ]; then
   ok "--help renders the verb table"
 else
   bad "--help renders the verb table"
+fi
+if [ "$("$SM" --help | grep -c 're-renders the report')" -ge 1 ]; then
+  ok "--help mentions the report re-render"
+else
+  bad "--help mentions the report re-render"
 fi
 
 # --- isolation ---------------------------------------------------------------

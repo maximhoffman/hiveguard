@@ -78,7 +78,12 @@
 # become hiveguard:// links the app handles — "mark as known" (ack <src> <pkg>,
 # or ack <src> on a row a project mute covered),
 # "mark project as known" (ack <src>) and, only with strict mode on and for a
-# root strict mode would block, "pause strict 1 h / 2 h" (strict pause). The
+# root strict mode would block, "pause strict 1 h / 2 h" (strict pause).
+# A project whose root has a running strict pause (~/.hiveguard/strict-pauses.tsv,
+# override: HIVEGUARD_PAUSES; read fresh at every render, expired and malformed rows
+# ignored) shows "strict paused until HH:MM" and a "resume strict" copy button
+# (hiveguard strict resume <root>) instead of the pause buttons — with or without
+# the app; a pause that runs out while the page is open is flagged by the page. The
 # app always asks for confirmation; the terminal command stays behind a small
 # "copy" button. --probe reports never carry links, and with the app not
 # running the report is exactly as before. Grammar: docs/report-links.md.
@@ -88,8 +93,9 @@
 # acknowledgements, through the same code the scan uses — so right after a scan
 # it reproduces that scan's report byte for byte, and after an ack change it is
 # what a scan with those acks would have written. `hiveguard ack` (mute,
-# --remove, --clear) runs it after every change. It reads the state, the ack
-# store, the config and the app/scan pid files; the app and strict gates of the
+# --remove, --clear) and `hiveguard strict pause` / `resume` run it after every
+# change. It reads the state, the ack store, the config, the strict pauses file
+# and the app/scan pid files; the app and strict gates of the
 # action buttons apply at render time. It writes the report (atomically, keeping
 # the report's modification time — the scan's — so --if-due and the
 # open-or-rescan gate never see a fresh report because of an ack), re-syncs the
@@ -210,6 +216,7 @@ SCAN_PID="${HIVEGUARD_SCAN_PID:-$HOME/.hiveguard/osv-daily.pid}"
 OPENED="${HIVEGUARD_REPORT_OPENED:-$HOME/.hiveguard/osv-report-opened}"
 APP_PID="${HIVEGUARD_APP_PID:-$HOME/.hiveguard/menubar.pid}"
 CONFIG="${HIVEGUARD_CONFIG:-$HOME/.hiveguard/config}"
+PAUSES="${HIVEGUARD_PAUSES:-$HOME/.hiveguard/strict-pauses.tsv}"
 # A probe writes its own report and never reads or writes the daily baseline.
 [ "$probe_flag" = 1 ] && REPORT="$HOME/.hiveguard/osv-probe.html"
 
@@ -282,7 +289,7 @@ render_report() {
   APP_RUNNING=0; app_running && APP_RUNNING=1
   local _rc=0
   RENDER=1 STATE="$STATE" OUT="$REPORT" ACKS="$ACKS" COUNTS="$COUNTS" MARKS="$MARKS" \
-    TARGETS_OUT="$TARGETS_OUT" APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" PROBE=0 \
+    TARGETS_OUT="$TARGETS_OUT" APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" PAUSES="$PAUSES" PROBE=0 \
     JSON="" RUN="" OPENED="" SCAN_TARGETS="" STAMP="" TARGET="" STARTED="" SCAN_RC="" \
     report_python || _rc=$?
   if [ "$_rc" = 3 ]; then
@@ -415,6 +422,27 @@ probe = os.environ.get("PROBE", "0") == "1"
 # need strict mode on (and a root strict would block — a key of root_agg).
 links_on = os.environ.get("APP_RUNNING", "0") == "1" and not probe
 strict_on = os.environ.get("STRICT_ON", "0") == "1"
+# Running strict pauses (strict-pauses.tsv: root<TAB>until_epoch) — the card of a
+# paused root shows the pause instead of offering one. Same row rule as `status`:
+# ≥2 fields, an all-digit until, still in the future; anything else is ignored.
+# Read fresh on every render, never written here.
+paused_until = {}
+_now = int(time.time())
+try:
+    with open(os.environ.get("PAUSES", "")) as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2 and parts[0] and re.fullmatch(r"[0-9]+", parts[1]) and int(parts[1]) > _now:
+                paused_until[parts[0]] = int(parts[1])
+except Exception:
+    paused_until = {}
+
+def pause_when(until):
+    # HH:MM when the pause ends on the render day (local time), else the CLI's long form
+    t = time.localtime(until)
+    n = time.localtime(_now)
+    return time.strftime("%H:%M", t) if (t.tm_year, t.tm_yday) == (n.tm_year, n.tm_yday) \
+        else time.strftime("%Y-%m-%d %H:%M", t)
 
 def finding_root(src):
     d0 = os.path.realpath(os.path.dirname(src))
@@ -873,6 +901,13 @@ for pr in acked:
     for p in pr["pkgs"]:
         e["kv"] += p["count"]
 
+def shown_pause(pr):   # UNTIL or None — Active cards only (callers pass active cards)
+    r = pr["root"]
+    if strict_on and not probe and r in root_agg and r in paused_until:
+        return paused_until[r]
+    return None
+any_paused = any(shown_pause(pr) is not None for pr in active)
+
 mark_active = sum(1 for e in root_agg.values() if e["has_active"])
 mark_acked  = len(root_agg) - mark_active
 
@@ -1103,14 +1138,31 @@ def proj_card(pr, muted):
     if muted:
         head_btn = cp_btn("hiveguard ack --remove " + shlex.quote(pr["src"]), "unmute all")
         whole = '<span class="whole">whole project</span>' if pr.get("whole") else ''
+        pbadge = ''
         last = "Unmute"
     else:
+        # a running strict pause: badge after the name block, "resume strict" in place
+        # of the pause links (app on) / after "mute project" (app off)
+        until = shown_pause(pr)
+        if until is None:
+            pbadge = rbtn = ''
+        else:
+            when = pause_when(until)
+            pbadge = (f'<span class="pausedbadge" data-until="{until}" title="Strict mode is paused for this '
+                      f'project until {when}. It lifts on its own then, or earlier with “resume strict”.">'
+                      f'strict paused until {when}</span>')
+            rbtn = ('<button class="cp res" type="button" data-cmd="'
+                    + html.escape("hiveguard strict resume " + shlex.quote(pr["root"])) +
+                    '" title="Copy the command that lifts the pause now, then paste it in your terminal">'
+                    'resume strict</button>')
         if links_on:
             links = app_link("ack-project", [("src", pr["src"])], "mark project as known",
                              "Mark every finding of this project as known via the HiveGuard app "
                              "(asks for confirmation)")
             root = pr["root"]
-            if strict_on and root in root_agg:
+            if until is not None:
+                links += rbtn
+            elif strict_on and root in root_agg:
                 for dur, words in (("1h", "1 hour"), ("2h", "2 hours")):
                     links += app_link("pause", [("root", root), ("for", dur)],
                                       "pause strict " + dur[:-1] + " h",
@@ -1118,7 +1170,7 @@ def proj_card(pr, muted):
                                       " via the HiveGuard app (asks for confirmation)", " pause")
             head_btn = f'<span class="actg">{links}{cp_alt("hiveguard ack " + shlex.quote(pr["src"]))}</span>'
         else:
-            head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project")
+            head_btn = cp_btn("hiveguard ack " + shlex.quote(pr["src"]), "mute project") + rbtn
         whole = ''
         last = "Mute"
     sel = ('<input type="checkbox" class="selp" '
@@ -1133,7 +1185,7 @@ def proj_card(pr, muted):
     return (f'<details id="{pid}" class="proj{" acked" if muted else ""}"><summary>'
             f'<span class="chev">▶</span>{sel}'
             f'{sev_badge(pr["maxsev"])}'
-            f'<span class="pname"><span class="pn">{proj_name(pr["src"])}</span><span class="pp">{short(pr["src"])}</span></span>{whole}'
+            f'<span class="pname"><span class="pn">{proj_name(pr["src"])}</span><span class="pp">{short(pr["src"])}</span></span>{whole}{pbadge}'
             f'<span class="cnt">{len(pr["pkgs"])} packages</span>{head_btn}</summary>'
             f'<div class="tblwrap"><table><thead><tr><th>Package</th><th>Version</th>'
             f'<th>Max severity</th><th>Fixed in</th><th>{"IDs" if adv_table is None else "Advisory"}</th><th class="acth">{last}</th></tr></thead>'
@@ -1275,6 +1327,29 @@ links_js = (r'''
   document.addEventListener('visibilitychange', function(){ if(document.hidden) gone(); else back(); });
 })();
 </script>''') if links_on else ""
+# pause-badge CSS/JS — only when a badge is shown, so every other report stays
+# byte-identical. The JS flips a badge whose pause ran out while the page sat open
+# (plain setInterval: a --for 30d pause would overflow a setTimeout to the instant).
+paused_css = ("\n.pausedbadge{font-family:var(--mono);font-size:10px;font-weight:600;padding:1px 6px;border-radius:5px;white-space:nowrap;background:var(--high-s);color:var(--high);letter-spacing:.02em}"
+              "\n.pausedbadge.ended{background:var(--surface-2);color:var(--muted)}") if any_paused else ""
+paused_js = (r'''
+<script>
+(function(){
+  // a pause is time-based: when it runs out while this page sits open, say so and
+  // drop the resume button (the pause links come back with the next reload/render)
+  function tick(){
+    var now=Date.now()/1000;
+    [].forEach.call(document.querySelectorAll('.pausedbadge[data-until]'), function(b){
+      if(+b.getAttribute('data-until')>now) return;
+      b.textContent='strict pause ended'; b.classList.add('ended'); b.removeAttribute('data-until');
+      b.title='The pause ran out while this page was open. Reload the report for the current buttons.';
+      var s=b.closest('summary'), r=s&&s.querySelector('button.res'); if(r) r.parentNode.removeChild(r);
+    });
+  }
+  tick(); setInterval(tick, 30000);
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) tick(); });
+})();
+</script>''') if any_paused else ""
 footer_hint = ("Buttons act through the HiveGuard menu bar app (it asks before changing anything); "
                "“copy” gives the terminal command instead." if links_on else
                "Mute an old project with the “mute” button (→ hiveguard ack).")
@@ -1381,7 +1456,7 @@ tr.adv>td{{background:var(--surface-2);padding:6px 12px 8px 28px}}
 .ackwrap>summary:hover{{color:var(--accent)}}
 .ackhint{{font-size:12px;color:var(--faint);margin:8px 0 6px}}
 footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--faint);font-size:12px;font-family:var(--mono)}}
-.hl{{outline:2px solid var(--accent);outline-offset:2px}}{links_css}
+.hl{{outline:2px solid var(--accent);outline-offset:2px}}{links_css}{paused_css}
 </style>
 <div class="wrap">
 <header>
@@ -1503,7 +1578,7 @@ footer{{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);colo
   }},true);
   sync();
 }})();
-</script>{links_js}'''
+</script>{links_js}{paused_js}'''
 # atomic: a browser reload during the write never sees a half page. --render
 # keeps the report's modification time — the scan's (or, when the report is
 # missing, the state file's, written at scan end) — so --if-due and the
@@ -1817,7 +1892,7 @@ fi
 # APP_RUNNING / STRICT_ON gate the report's action links (see the header).
 STRICT_ON=0; [ "$(config_get strict 0)" = 1 ] && STRICT_ON=1
 APP_RUNNING=0; app_running && APP_RUNNING=1
-APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" report_python
+APP_RUNNING="$APP_RUNNING" STRICT_ON="$STRICT_ON" PAUSES="$PAUSES" JSON="$JSON" OUT="$REPORT" STAMP="$STAMP" TARGET="$TARGET_STR" ACKS="$ACKS" COUNTS="$COUNTS" STATE="$STATE" MARKS="$MARKS" SCAN_TARGETS="$SCAN_TARGETS" PROBE="$probe_flag" RUN="$RUN" OPENED="$OPENED" STARTED="$STARTED" SCAN_RC="$scan_rc" report_python
 
 # active/acked counts computed by python (notification + log use the ACTIVE ones)
 ACTIVE_PROJECTS=0; ACTIVE_PKGS=0; ACTIVE_VULNS=0; ACTIVE_CRIT=0
