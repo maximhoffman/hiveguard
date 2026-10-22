@@ -6,6 +6,24 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The report now shows a running strict pause.** Clicking *pause strict* used to leave
+  the project card exactly as it was — the report never read the pauses file and
+  `hiveguard strict pause` never re-rendered — so the reloaded page offered the same
+  buttons and the next click was refused as "already paused". A paused project's card now
+  carries an orange *strict paused until HH:MM* badge and a *resume strict* copy button
+  (`hiveguard strict resume "<root>"`) in place of the pause buttons, with or without the
+  menu bar app; if the pause runs out while the page is open the badge turns into
+  *strict pause ended* and the resume button goes.
+
+### Changed
+- `hiveguard strict pause`, `resume` and `resume --all` re-render the daily report from
+  the last scan's saved results (no scan), the way `hiveguard ack` does; a refresh that
+  cannot happen (scan in progress, a scan older than re-rendering) is a note, never a
+  failure, and before any scan nothing is printed. `docs/report-links.md`: no `pause` link
+  is emitted for a paused root; a `resume` action is reserved (not emitted, app support
+  pending).
+
 ## [1.9.0] - 2026-10-22
 
 ### Added

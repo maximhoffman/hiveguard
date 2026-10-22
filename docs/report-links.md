@@ -14,8 +14,10 @@ the app validates links against is described in [`docs/status-json.md`](status-j
 - Only while the companion app is running at report time (its presence pid file is
   alive — the same check the notifier handoff uses).
 - Never in `--probe` reports (those are internal to strict mode).
-- `pause` links only when strict mode is on and the project root is one strict would
-  actually block.
+- `pause` links only when strict mode is on, the project root is one strict would
+  actually block, **and no pause is running for that root**. A paused root shows "strict
+  paused until HH:MM" and a "resume strict" copy button (`hiveguard strict resume <root>`)
+  instead — the engine re-renders on every `strict pause` / `resume`.
 - Otherwise the report carries no links and looks exactly as it did before links existed.
 - Only the Active section has link buttons; the Acknowledged section is unchanged.
 - The same gate applies when the report is re-rendered after an acknowledgement
@@ -35,6 +37,10 @@ hiveguard://<action>?v=1&<params>
 | `ack` | `src`, `pkg` | mark one finding (package) as known | `hiveguard ack <src> <pkg>` |
 | `ack-project` | `src` | mark every finding of that manifest as known | `hiveguard ack <src>` |
 | `pause` | `root`, `for` (`1h` or `2h`) | pause strict mode for that project | `hiveguard strict pause <root> --for <for>` |
+
+Reserved (additive, not emitted today, no app support yet): `resume` with
+`root=<project root>` → `hiveguard strict resume <root>`. A consumer that does not know it
+refuses it, per the versioning rule.
 
 - `src` is the manifest/lockfile path, the same string the report's copy buttons put
   into `hiveguard ack` (the key of the ack store). `root` is the realpath'd project
@@ -84,7 +90,11 @@ Any web page can fire a custom-scheme URL, so every link is treated as untrusted
 - After a confirmed `ack` / `ack-project` the engine re-renders the report from the last
   scan's saved results (`daily --render`) and refreshes the folder markers (no rescan);
   reload the page.
-  `pause` leaves the report unchanged.
+- After a confirmed `pause` the engine re-renders the report too (`hiveguard strict pause`
+  runs `daily --render`): the project card shows "strict paused until HH:MM" and a
+  "resume strict" copy button instead of the pause buttons; reload the page (it reloads
+  itself when you come back from the dialog). Lifting the pause from the app's menu
+  (`strict resume`) re-renders as well.
 
 ## The `copy` fallback
 
@@ -105,3 +115,4 @@ hiveguard://pause?v=1&root=%2FUsers%2Fmh%2FProjects%2Fx%2Fapp&for=2h
 | Version | Date | Change |
 |---|---|---|
 | 1 | 2026-10 | initial |
+| 1 | 2026-10 | additive: no `pause` link for a paused root (badge + resume copy button instead); `resume` reserved |

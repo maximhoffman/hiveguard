@@ -407,14 +407,16 @@ Every row in the report carries a **mute** / **unmute** button that copies the e
 command for that project or package — click, paste, run. Acknowledgements persist in
 `~/.hiveguard/osv-acks.json`, so the next scan and the scheduled agent both honour them. Every `hiveguard ack` change
 (mute, `--remove`, `--clear`) re-renders the report and refreshes the folder markers at
-once — reload the report to see the row move; no rescan.
+once; so do `hiveguard strict pause` and `resume` — reload the report to see the row move; no rescan.
 When everything active is acknowledged, the report shows zero and the daily notification
 stays quiet (until a new advisory pierces a mute). The `<path>` is the source path
 (lockfile/manifest) shown on each project row.
 
 **With the companion app running** when a scan writes the report, the active rows and
 project cards also show buttons that act through the app: *mark as known*, *mark project
-as known*, and (when strict mode is on) *pause strict 1 h* / *2 h*. The app always asks
+as known*, and (when strict mode is on) *pause strict 1 h* / *2 h*. While a pause runs, the card says
+*strict paused until HH:MM* and offers *resume strict* (copies `hiveguard strict resume …`)
+instead; the badge flips to "strict pause ended" if the page outlives the pause. The app always asks
 for confirmation and checks the request against the current state before changing
 anything; the terminal command stays one click away behind the small *copy* button. The
 link grammar is in [`docs/report-links.md`](docs/report-links.md).
@@ -489,11 +491,14 @@ The full verb set — `hiveguard strict on|off|status|pause|resume`:
 
 ```bash
 hiveguard strict status              # on/off, hook sourced?, blocked projects, running pauses
-hiveguard strict pause [path]        # release ONE project for 1h (default)
+hiveguard strict pause [path]        # release ONE project for 1h (default); re-renders the report
 hiveguard strict pause --for 2h      # …or a custom duration (Nm / Nh / Nd)
-hiveguard strict resume [path]       # lift a pause early
+hiveguard strict resume [path]       # lift a pause early; re-renders the report
 hiveguard strict off                 # disable — open terminals stop blocking at their next prompt
 ```
+
+A pause or resume also refreshes the daily report, so a reloaded report shows the
+paused project as paused instead of offering the pause again.
 
 A refusal looks like this:
 
