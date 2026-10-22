@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-22
+
 ### Fixed
 - **The report now shows a running strict pause.** Clicking *pause strict* used to leave
   the project card exactly as it was — the report never read the pauses file and
